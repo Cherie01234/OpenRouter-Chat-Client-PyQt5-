@@ -67,7 +67,7 @@ export OPENROUTER_API_KEY="your_api_key_here"
 ### 4. アプリケーションを起動
 
 ```bash
-python main.py
+python GUI.py
 ```
 
 ---
