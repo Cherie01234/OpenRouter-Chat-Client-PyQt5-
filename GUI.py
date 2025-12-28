@@ -39,9 +39,7 @@ class ApiWorker(QThread):
                 "max_tokens": self.max_tokens
             }
             
-            # モデルごとの推論設定
-	　　      # 新しいLLMを追加する場合は、
-	　　      # ここにモデル名の判定と対応するパラメータを追記することで拡張可能
+            # モデルに応じた推論パラメータの設定
             if self.use_reasoning:
                 if "deepseek" in self.model:
                     # DeepSeekモデルの場合
@@ -184,9 +182,9 @@ class OpenRouterChatApp(QMainWindow):
         settings_layout.addWidget(QLabel("モデル:"))
         self.model_combo = QComboBox()
 
-	      # 利用可能なLLMモデル一覧
-	      # OpenRouterに対応したモデル名を追加することで、
-	      # 新しいLLMを簡単に選択・利用できるようになります
+	# 利用可能なLLMモデル一覧
+	# OpenRouterに対応したモデル名を追加することで、
+	# 新しいLLMを簡単に選択・利用できるようになります
         self.model_combo.addItems([
             "deepseek/deepseek-v3.2",
             "deepseek/deepseek-v3.2-exp",
@@ -464,10 +462,6 @@ class OpenRouterChatApp(QMainWindow):
         
         # モデル名に応じて表示名を変更
         model_name = self.model_combo.currentText()
-
-	      # モデル名に応じて表示ラベルを切り替え
-	      # 新しいLLMを追加する場合は、
-	      # 表示名をここで定義することでUI側の変更を最小限に抑えられます
         if "deepseek" in model_name:
             self.append_to_conversation("DeepSeek", content)
         elif "grok" in model_name:
