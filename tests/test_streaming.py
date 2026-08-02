@@ -14,7 +14,7 @@ from GUI import Message
 
 
 DEEPSEEK = "deepseek/deepseek-v4-pro"
-GROK     = "x-ai/grok-4.3"
+GROK     = "openai/gpt-5.6-luna"
 
 
 def stream(window, model, chunks):
@@ -94,9 +94,9 @@ class TestCancel:
 
     def test_zero_chunk_cancel_removes_the_whole_message(self, window):
         window._start_streaming_display(GROK)
-        assert "Grok:" in window.conversation_text.toPlainText()
+        assert "Luna:" in window.conversation_text.toPlainText()
         window._on_stream_finished("", {}, GUI.STATUS_CANCELLED)
-        assert "Grok:" not in window.conversation_text.toPlainText()
+        assert "Luna:" not in window.conversation_text.toPlainText()
         assert window.conversation_history == []
 
     def test_cancel_keeps_previous_reasoning(self, window):

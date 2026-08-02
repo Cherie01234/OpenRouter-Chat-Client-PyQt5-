@@ -123,23 +123,28 @@ def wait_until(app, predicate, timeout: float = 5.0) -> bool:
     return bool(predicate())
 
 
+# 実際の /api/v1/models の値に合わせてある（2026-08-02 時点）
 CATALOG_FIXTURE = {
     "deepseek/deepseek-v4-pro": {
         "supports_reasoning": True, "supports_thinking_level": True,
+        "reasoning_efforts": ["xhigh", "high"], "reasoning_default": "high",
         "context_length": 1_048_576, "max_completion_tokens": 384_000,
         "input_modalities": ["text"],
         "price_prompt": 4.3e-7, "price_completion": 8.7e-7,
     },
-    "x-ai/grok-4.3": {
+    "deepseek/deepseek-v4-flash-0731": {
         "supports_reasoning": True, "supports_thinking_level": True,
-        "context_length": 1_000_000, "max_completion_tokens": None,
-        "input_modalities": ["text", "image", "file"],
-        "price_prompt": 1.25e-6, "price_completion": 2.5e-6,
+        "reasoning_efforts": ["max", "high", "low"], "reasoning_default": "high",
+        "context_length": 1_048_576, "max_completion_tokens": 65_536,
+        "input_modalities": ["text"],
+        "price_prompt": 9e-8, "price_completion": 1.8e-7,
     },
-    "google/gemini-3-flash-preview": {
+    "openai/gpt-5.6-luna": {
         "supports_reasoning": True, "supports_thinking_level": True,
-        "context_length": 1_048_576, "max_completion_tokens": 65_535,
-        "input_modalities": ["text", "image", "file", "audio", "video"],
-        "price_prompt": 5e-7, "price_completion": 3e-6,
+        "reasoning_efforts": ["max", "xhigh", "high", "medium", "low", "none"],
+        "reasoning_default": "medium",
+        "context_length": 1_050_000, "max_completion_tokens": 128_000,
+        "input_modalities": ["file", "image", "text"],
+        "price_prompt": 1e-7, "price_completion": 6e-7,
     },
 }

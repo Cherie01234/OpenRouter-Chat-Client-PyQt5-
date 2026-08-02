@@ -29,7 +29,7 @@ def choose_open(monkeypatch, path):
 def sample_history():
     return [
         Message.user("第一章を書いて"),
-        Message.assistant("彼は歩き出した。", model="x-ai/grok-4.3",
+        Message.assistant("彼は歩き出した。", model="openai/gpt-5.6-luna",
                           reasoning="構成を考えた", usage={"completion_tokens": 42}),
     ]
 
@@ -51,7 +51,7 @@ class TestSaveAndLoad:
         loader._load_conversation()
 
         restored = loader.conversation_history[1]
-        assert restored.model == "x-ai/grok-4.3"
+        assert restored.model == "openai/gpt-5.6-luna"
         assert restored.reasoning == "構成を考えた"
         assert restored.usage["completion_tokens"] == 42
 
@@ -76,7 +76,7 @@ class TestSaveAndLoad:
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
         path = tmp_path / "legacy.json"
         path.write_text(json.dumps({
-            "model": "google/gemini-3-flash-preview",
+            "model": "deepseek/deepseek-v4-flash-0731",
             "conversation": [
                 {"role": "user", "content": "旧形式の質問"},        # content が str
                 {"role": "assistant", "content": [{"type": "text", "text": "旧形式の回答"}]},
@@ -88,8 +88,8 @@ class TestSaveAndLoad:
 
         assert window.conversation_history[0].content == \
             [{"type": "text", "text": "旧形式の質問"}]
-        assert window.conversation_history[1].model == "google/gemini-3-flash-preview"
-        assert "Gemini: 旧形式の回答" in window.conversation_text.toPlainText()
+        assert window.conversation_history[1].model == "deepseek/deepseek-v4-flash-0731"
+        assert "DeepSeek Flash: 旧形式の回答" in window.conversation_text.toPlainText()
 
     def test_cancelled_dialog_reports_failure(self, window, monkeypatch):
         monkeypatch.setattr(QFileDialog, "getSaveFileName",
@@ -105,7 +105,7 @@ class TestMarkdownExport:
             Message.user("質問1"),
             Message.assistant("回答1", model="deepseek/deepseek-v4-pro"),
             Message.user("質問2"),
-            Message.assistant("回答2", model="x-ai/grok-4.3"),
+            Message.assistant("回答2", model="openai/gpt-5.6-luna"),
         ]
         path = tmp_path / "log.md"
         choose_save(monkeypatch, path)
@@ -113,8 +113,8 @@ class TestMarkdownExport:
 
         text = path.read_text(encoding="utf-8")
         assert "## DeepSeek\n" in text
-        assert "## Grok\n" in text
-        assert "deepseek/deepseek-v4-pro" in text and "x-ai/grok-4.3" in text
+        assert "## Luna\n" in text
+        assert "deepseek/deepseek-v4-pro" in text and "openai/gpt-5.6-luna" in text
 
 
 class TestQuickSave:
@@ -262,7 +262,7 @@ class TestEditMode:
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
         window.conversation_history = [
             Message.user("元の質問"),
-            Message.assistant("元の回答", model="x-ai/grok-4.3", reasoning="R",
+            Message.assistant("元の回答", model="openai/gpt-5.6-luna", reasoning="R",
                               usage={"completion_tokens": 9}),
         ]
         last = self._edit(window, "存在しない文字列", "x")[1]
@@ -278,17 +278,17 @@ class TestEditMode:
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
         window.conversation_history = [
             Message.user("元の質問"),
-            Message.assistant("元の回答", model="x-ai/grok-4.3", reasoning="R",
+            Message.assistant("元の回答", model="openai/gpt-5.6-luna", reasoning="R",
                               usage={"completion_tokens": 9}),
         ]
         last = self._edit(window, "元の回答", "直した回答")[1]
 
         assert last.text == "直した回答"
-        assert last.model == "x-ai/grok-4.3"     # どのモデル由来かは残す
+        assert last.model == "openai/gpt-5.6-luna"     # どのモデル由来かは残す
         assert last.reasoning == ""              # 本文と対応しないので捨てる
         assert last.usage == {}
         assert last.edited is True
-        assert "Grok: 直した回答" in window.conversation_text.toPlainText()
+        assert "Luna: 直した回答" in window.conversation_text.toPlainText()
 
     def test_cannot_enter_edit_mode_while_streaming(self, window, monkeypatch):
         monkeypatch.setattr(GUI.ApiWorker, "start", lambda self: None)

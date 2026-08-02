@@ -17,10 +17,10 @@ class TestBasics:
             [{"type": "text", "text": "こんにちは"}]
 
     def test_display_name_comes_from_the_recorded_model(self):
-        assert Message.assistant("本文", model="x-ai/grok-4.3").display_name == "Grok"
+        assert Message.assistant("本文", model="openai/gpt-5.6-luna").display_name == "Luna"
 
     def test_color_comes_from_the_recorded_model(self):
-        assert Message.assistant("本文", model="x-ai/grok-4.3").color == "#f5a623"
+        assert Message.assistant("本文", model="openai/gpt-5.6-luna").color == "#c084fc"
 
     def test_assistant_without_model_falls_back(self):
         assert Message("assistant", []).display_name == "アシスタント"
@@ -40,12 +40,12 @@ class TestBasics:
 
 class TestApiPayload:
     def test_only_role_and_content_are_sent(self):
-        message = Message.assistant("本文", model="x-ai/grok-4.3",
+        message = Message.assistant("本文", model="openai/gpt-5.6-luna",
                                     reasoning="思考", usage={"cost": 1})
         assert set(message.to_api()) == {"role", "content"}
 
     def test_metadata_never_leaks_into_the_request(self):
-        message = Message.assistant("本文", model="x-ai/grok-4.3", reasoning="秘密")
+        message = Message.assistant("本文", model="openai/gpt-5.6-luna", reasoning="秘密")
         assert "秘密" not in json.dumps(message.to_api(), ensure_ascii=False)
 
     def test_system_prompt_goes_first(self, window):
@@ -58,7 +58,7 @@ class TestApiPayload:
 
 class TestJsonRoundTrip:
     def test_round_trip_preserves_everything(self):
-        original = Message.assistant("本文", model="x-ai/grok-4.3",
+        original = Message.assistant("本文", model="openai/gpt-5.6-luna",
                                      reasoning="思考", usage={"cost": 0.5})
         restored = Message.from_json(json.loads(json.dumps(original.to_json())))
         assert (restored.role, restored.text, restored.model,
@@ -90,12 +90,12 @@ class TestModelIsRemembered:
             Message.user("質問1"),
             Message.assistant("DeepSeekの回答", model="deepseek/deepseek-v4-pro"),
             Message.user("質問2"),
-            Message.assistant("Grokの回答", model="x-ai/grok-4.3"),
+            Message.assistant("Lunaの回答", model="openai/gpt-5.6-luna"),
         ]
-        window.model_combo.setCurrentText("google/gemini-3-flash-preview")
+        window.model_combo.setCurrentText("deepseek/deepseek-v4-flash-0731")
         window._redraw_conversation()
 
         shown = window.conversation_text.toPlainText()
         assert "DeepSeek: DeepSeekの回答" in shown
-        assert "Grok: Grokの回答" in shown
-        assert "Gemini:" not in shown        # 現在の選択は混ざらない
+        assert "Luna: Lunaの回答" in shown
+        assert "DeepSeek Flash:" not in shown        # 現在の選択は混ざらない

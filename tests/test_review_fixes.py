@@ -140,7 +140,7 @@ class TestResponseStatus:
 
     def test_status_survives_redraw(self, window):
         window.conversation_history = [
-            Message.assistant("部分", model="x-ai/grok-4.3",
+            Message.assistant("部分", model="openai/gpt-5.6-luna",
                               status=GUI.STATUS_CANCELLED)]
         window._redraw_conversation()
         assert "（キャンセルされました）" in window.conversation_text.toPlainText()
@@ -148,7 +148,7 @@ class TestResponseStatus:
     def test_status_survives_save_and_load(self, window, monkeypatch, tmp_path):
         path = tmp_path / "conv.json"
         window.conversation_history = [
-            Message.assistant("部分", model="x-ai/grok-4.3",
+            Message.assistant("部分", model="openai/gpt-5.6-luna",
                               status=GUI.STATUS_TRUNCATED)]
         monkeypatch.setattr(QFileDialog, "getSaveFileName",
                             staticmethod(lambda *a, **k: (str(path), "")))
@@ -249,8 +249,8 @@ class TestPerModelReasoningEfforts:
         "deepseek/deepseek-v4-pro": {
             **CATALOG_FIXTURE["deepseek/deepseek-v4-pro"],
             "reasoning_efforts": ["xhigh", "high"], "reasoning_default": "high"},
-        "x-ai/grok-4.3": {
-            **CATALOG_FIXTURE["x-ai/grok-4.3"],
+        "openai/gpt-5.6-luna": {
+            **CATALOG_FIXTURE["openai/gpt-5.6-luna"],
             "reasoning_efforts": ["high", "medium", "low", "none"],
             "reasoning_default": "low"},
     }
@@ -274,24 +274,24 @@ class TestPerModelReasoningEfforts:
         assert items == ["xhigh", "high"]
         assert "minimal" not in items          # DeepSeek に minimal は無い
 
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
         items = [window.thinking_level_combo.itemText(i)
                  for i in range(window.thinking_level_combo.count())]
         assert items == ["high", "medium", "low", "none"]
-        assert "xhigh" not in items            # Grok に xhigh は無い
+        assert "xhigh" not in items            # Luna に xhigh は無い
 
     def test_falls_back_to_the_model_default(self, window):
         window._on_catalog_loaded(self.CATALOG, True)
         window.model_combo.setCurrentText("deepseek/deepseek-v4-pro")
         window.thinking_level_combo.setCurrentText("xhigh")
 
-        window.model_combo.setCurrentText("x-ai/grok-4.3")   # xhigh は無い
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")   # xhigh は無い
         assert window.thinking_level_combo.currentText() == "low"
 
     def test_worker_only_sends_supported_effort(self):
         GUI.MODEL_CATALOG.update(self.CATALOG)
-        config = GUI.get_model_config("x-ai/grok-4.3")
-        worker = GUI.ApiWorker("k", [], True, 0.7, 100, "x-ai/grok-4.3",
+        config = GUI.get_model_config("openai/gpt-5.6-luna")
+        worker = GUI.ApiWorker("k", [], True, 0.7, 100, "openai/gpt-5.6-luna",
                                "xhigh", model_config=config)
         # 対応しない effort は送らず、既定の有効化に落とす
         assert worker._build_reasoning_params() == {"reasoning": {"enabled": True}}
@@ -315,12 +315,12 @@ class TestPricingOverrides:
         assert GUI.prompt_price(config, 200_000) == pytest.approx(2.5e-6)
 
     def test_estimate_uses_the_higher_rate(self, window):
-        GUI.MODEL_CATALOG.update({"x-ai/grok-4.3": {
-            **CATALOG_FIXTURE["x-ai/grok-4.3"],
+        GUI.MODEL_CATALOG.update({"openai/gpt-5.6-luna": {
+            **CATALOG_FIXTURE["openai/gpt-5.6-luna"],
             "price_overrides": [(200_000, 2.5e-6)]}})
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
         window.conversation_history = [
-            Message.assistant("A", model="x-ai/grok-4.3",
+            Message.assistant("A", model="openai/gpt-5.6-luna",
                               usage={"prompt_tokens": 250_000, "completion_tokens": 0})]
         window._update_usage_label()
         # 250,000 tok * 2.5e-6 = $0.625（上書き前なら $0.3125）
@@ -334,8 +334,8 @@ class TestCatalogSnapshot:
         読むと、空カタログとして推論設定が変わる。
         """
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        config = GUI.get_model_config("x-ai/grok-4.3")
-        worker = GUI.ApiWorker("k", [], True, 0.7, 100, "x-ai/grok-4.3",
+        config = GUI.get_model_config("openai/gpt-5.6-luna")
+        worker = GUI.ApiWorker("k", [], True, 0.7, 100, "openai/gpt-5.6-luna",
                                "high", model_config=config)
         GUI.MODEL_CATALOG.clear()
         assert worker._build_reasoning_params() == {"reasoning": {"effort": "high"}}
@@ -351,7 +351,7 @@ class TestRegenerateKeepsTheOldAnswer:
         window.api_key = "key"
         window.conversation_history = [
             Message.user("続きを書いて"),
-            Message.assistant("元の案", model="x-ai/grok-4.3", reasoning="R"),
+            Message.assistant("元の案", model="openai/gpt-5.6-luna", reasoning="R"),
         ]
         window._redraw_conversation()
         window._update_usage_label()
@@ -414,7 +414,7 @@ class TestEditModeRoundTrip:
     def round_trip(self, window, text, role="assistant"):
         window.conversation_history = [
             Message(role, [{"type": "text", "text": text}],
-                    model="x-ai/grok-4.3")]
+                    model="openai/gpt-5.6-luna")]
         window._toggle_edit_mode()
         window._toggle_edit_mode()
         return window.conversation_history
@@ -441,9 +441,9 @@ class TestEditModeRoundTrip:
     def test_bulk_deletion_of_several_turns(self, window):
         """まとめて消して書き直す使い方を壊さないこと。"""
         window.conversation_history = [
-            Message.user("Q1"), Message.assistant("A1", model="x-ai/grok-4.3"),
-            Message.user("Q2"), Message.assistant("A2", model="x-ai/grok-4.3"),
-            Message.user("Q3"), Message.assistant("A3", model="x-ai/grok-4.3"),
+            Message.user("Q1"), Message.assistant("A1", model="openai/gpt-5.6-luna"),
+            Message.user("Q2"), Message.assistant("A2", model="openai/gpt-5.6-luna"),
+            Message.user("Q3"), Message.assistant("A3", model="openai/gpt-5.6-luna"),
         ]
         window._toggle_edit_mode()
         document = window.conversation_text.toPlainText()
@@ -452,11 +452,11 @@ class TestEditModeRoundTrip:
         window._toggle_edit_mode()
 
         assert [m.text for m in window.conversation_history] == ["Q1", "A1"]
-        assert window.conversation_history[1].model == "x-ai/grok-4.3"
+        assert window.conversation_history[1].model == "openai/gpt-5.6-luna"
 
     def test_rewriting_drops_stale_reasoning(self, window):
         window.conversation_history = [
-            Message.assistant("元の回答", model="x-ai/grok-4.3", reasoning="R",
+            Message.assistant("元の回答", model="openai/gpt-5.6-luna", reasoning="R",
                               usage={"completion_tokens": 9})]
         window._toggle_edit_mode()
         window.conversation_text.setPlainText(
@@ -465,7 +465,7 @@ class TestEditModeRoundTrip:
 
         last = window.conversation_history[0]
         assert last.text == "直した回答"
-        assert last.model == "x-ai/grok-4.3"
+        assert last.model == "openai/gpt-5.6-luna"
         assert last.reasoning == "" and last.usage == {}
         assert last.edited is True
 
@@ -477,7 +477,7 @@ class TestEditModeRoundTrip:
         auto_dialog(QMessageBox.Ok)
         window.conversation_history = [
             Message.user("大事な会話"),
-            Message.assistant("大事な応答", model="x-ai/grok-4.3")]
+            Message.assistant("大事な応答", model="openai/gpt-5.6-luna")]
         window._toggle_edit_mode()
         window.conversation_text.setPlainText("区切りを消してしまった本文")
         window._toggle_edit_mode()

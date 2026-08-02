@@ -98,7 +98,7 @@ class TestRegenerate:
         assert not window.regen_button.isEnabled()
 
         window.conversation_history.append(
-            Message.assistant("回答", model="x-ai/grok-4.3"))
+            Message.assistant("回答", model="openai/gpt-5.6-luna"))
         window._update_usage_label()
         assert window.regen_button.isEnabled()
 
@@ -108,7 +108,7 @@ class TestRegenerate:
                             lambda self, messages: sent.update(messages=messages))
         window.conversation_history = [
             Message.user("続きを書いて"),
-            Message.assistant("案1", model="x-ai/grok-4.3"),
+            Message.assistant("案1", model="openai/gpt-5.6-luna"),
         ]
         window._redraw_conversation()
         window._regenerate()
@@ -126,24 +126,24 @@ class TestRegenerate:
 class TestUsageLabel:
     def test_shows_tokens_cost_and_share(self, window):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
         window.conversation_history = [
             Message.user("Q"),
-            Message.assistant("A", model="x-ai/grok-4.3", usage={
+            Message.assistant("A", model="openai/gpt-5.6-luna", usage={
                 "prompt_tokens": 10_000, "completion_tokens": 2_000, "cost": 0.0215}),
         ]
         window._update_usage_label()
 
         text = window.usage_label.text()
         assert "12,000 tok" in text          # 次回の入力見込み = 入力 + 出力
-        assert "1.2%" in text
+        assert "1.1%" in text
         assert "次回入力" in text
         assert "セッション累計" in text
 
     def test_session_cost_is_summed(self, window):
         window.conversation_history = [
-            Message.assistant("A", model="x-ai/grok-4.3", usage={"cost": 0.01}),
-            Message.assistant("B", model="x-ai/grok-4.3", usage={"cost": 0.02}),
+            Message.assistant("A", model="openai/gpt-5.6-luna", usage={"cost": 0.01}),
+            Message.assistant("B", model="openai/gpt-5.6-luna", usage={"cost": 0.02}),
         ]
         assert window._session_cost() == pytest.approx(0.03)
 
@@ -170,7 +170,7 @@ class TestAttachments:
 
     def test_clipboard_image_is_attached(self, window):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
 
         assert window._accept_mime(self._image_mime()) is True
         assert len(window.selected_images) == 1
@@ -179,7 +179,7 @@ class TestAttachments:
 
     def test_repeated_pastes_are_numbered(self, window):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
         window._accept_mime(self._image_mime())
         window._accept_mime(self._image_mime())
         assert window.selected_images[1][2] == "clipboard-2.png"
