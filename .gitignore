@@ -4,3 +4,4 @@ venv/
 .venv/
 OpenRouter_API_Key.txt
 images/_preview.png
+.pytest_cache/
