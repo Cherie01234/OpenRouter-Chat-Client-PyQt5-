@@ -5,7 +5,7 @@
 ## 概要
 
 OpenRouter API を利用した、デスクトップ向けチャットクライアントアプリです。
-PyQt5 を用いて GUI を構築し、複数の LLM モデル（DeepSeek / Grok / Gemini）を切り替えて利用できます。
+PyQt5 を用いて GUI を構築し、複数の LLM モデルを切り替えて利用できます。
 
 個人学習および技術検証を目的として開発しました。
 
@@ -118,9 +118,8 @@ python GUI.py
 | 表示名 | モデルID |
 |--------|----------|
 | DeepSeek | `deepseek/deepseek-v4-pro` |
-| DeepSeek Flash | `deepseek/deepseek-v4-flash` |
-| Grok | `x-ai/grok-4.3` |
-| Gemini | `google/gemini-3-flash-preview` |
+| DeepSeek Flash | `deepseek/deepseek-v4-flash-0731` |
+| Luna | `openai/gpt-5.6-luna` |
 
 推論機能の対応可否・コンテキスト長・出力上限・価格・画像入力の可否は、
 起動時に OpenRouter の `/api/v1/models` から取得します（認証不要）。

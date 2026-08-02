@@ -40,33 +40,26 @@ except ImportError:
 # モデル設定（ここだけ編集すれば新モデル追加可能）
 # ═══════════════════════════════════════════════════════════════
 
+# 表示名と色だけを手で定義する。推論の対応可否・コンテキスト長・出力上限・
+# 価格・入力形式は、起動時に /api/v1/models から取得して上書きする。
+# ここの supports_* は、カタログを取得できなかったときの控え。
 MODEL_CONFIGS: dict[str, dict] = {
     "deepseek/deepseek-v4-pro": {
         "display_name": "DeepSeek",
         "color": "#7ec8a0",          # 会話表示の送信者色
         "supports_reasoning": True,
-        "reasoning_type": "deepseek",
-        "supports_thinking_level": False,
+        "supports_thinking_level": True,
     },
-    "deepseek/deepseek-v4-flash": {
+    "deepseek/deepseek-v4-flash-0731": {
         "display_name": "DeepSeek Flash",
         "color": "#5aa87f",          # Pro より少し濃い緑で区別
         "supports_reasoning": True,
-        "reasoning_type": "deepseek",
-        "supports_thinking_level": False,
+        "supports_thinking_level": True,
     },
-    "x-ai/grok-4.3": {
-        "display_name": "Grok",
-        "color": "#f5a623",
-        "supports_reasoning": True,
-        "reasoning_type": "grok",
-        "supports_thinking_level": False,
-    },
-    "google/gemini-3-flash-preview": {
-        "display_name": "Gemini",
+    "openai/gpt-5.6-luna": {
+        "display_name": "Luna",
         "color": "#c084fc",
         "supports_reasoning": True,
-        "reasoning_type": "gemini",
         "supports_thinking_level": True,
     },
 }
@@ -290,7 +283,6 @@ DIALOG_STYLE = """
 
 _CONFIG_DEFAULTS = {
     "supports_reasoning":      False,
-    "reasoning_type":          None,
     "supports_thinking_level": False,
     "reasoning_efforts":       [],
     "reasoning_default":       None,

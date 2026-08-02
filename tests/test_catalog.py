@@ -13,11 +13,11 @@ from conftest import CATALOG_FIXTURE
 
 
 SAMPLE_PAYLOAD = {"data": [{
-    "id": "google/gemini-3-flash-preview",
-    "name": "Gemini",
+    "id": "deepseek/deepseek-v4-flash-0731",
+    "name": "DeepSeek Flash",
     "context_length": 1_048_576,
     "architecture": {"input_modalities": ["text", "image"]},
-    "top_provider": {"max_completion_tokens": 65_535},
+    "top_provider": {"max_completion_tokens": 65_536},
     "pricing": {"prompt": "0.0000005", "completion": "0.000003"},
     "supported_parameters": ["reasoning", "reasoning_effort", "max_tokens"],
 }]}
@@ -25,11 +25,11 @@ SAMPLE_PAYLOAD = {"data": [{
 
 class TestParsing:
     def test_capabilities_are_derived(self):
-        entry = GUI.parse_model_catalog(SAMPLE_PAYLOAD)["google/gemini-3-flash-preview"]
+        entry = GUI.parse_model_catalog(SAMPLE_PAYLOAD)["deepseek/deepseek-v4-flash-0731"]
         assert entry["supports_reasoning"] is True
         assert entry["supports_thinking_level"] is True
         assert entry["context_length"] == 1_048_576
-        assert entry["max_completion_tokens"] == 65_535
+        assert entry["max_completion_tokens"] == 65_536
         assert entry["price_prompt"] == pytest.approx(5e-7)
 
     def test_empty_payload(self):
@@ -52,14 +52,14 @@ class TestParsing:
 class TestMerge:
     def test_display_name_and_color_stay_hand_written(self):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        config = GUI.get_model_config("google/gemini-3-flash-preview")
-        assert config["display_name"] == "Gemini"
-        assert config["color"] == "#c084fc"
+        config = GUI.get_model_config("deepseek/deepseek-v4-flash-0731")
+        assert config["display_name"] == "DeepSeek Flash"
+        assert config["color"] == "#5aa87f"
 
     def test_capabilities_come_from_the_api(self):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
         assert GUI.get_model_config(
-            "google/gemini-3-flash-preview")["max_completion_tokens"] == 65_535
+            "deepseek/deepseek-v4-flash-0731")["max_completion_tokens"] == 65_536
 
     def test_unknown_model_does_not_raise(self):
         assert GUI.get_model_config("foo/bar")["display_name"] == "bar"
@@ -77,8 +77,8 @@ class TestUiFollowsCatalog:
     def test_max_tokens_ceiling_matches_the_model(self, window):
         window._on_catalog_loaded(CATALOG_FIXTURE, True)
 
-        window.model_combo.setCurrentText("google/gemini-3-flash-preview")
-        assert window.max_tokens_spin.maximum() == 65_535
+        window.model_combo.setCurrentText("deepseek/deepseek-v4-flash-0731")
+        assert window.max_tokens_spin.maximum() == 65_536
 
         window.model_combo.setCurrentText("deepseek/deepseek-v4-pro")
         assert window.max_tokens_spin.maximum() == 384_000
@@ -86,7 +86,7 @@ class TestUiFollowsCatalog:
     def test_image_button_follows_the_model(self, window):
         window._on_catalog_loaded(CATALOG_FIXTURE, True)
 
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
         assert window.add_image_btn.isEnabled()
 
         window.model_combo.setCurrentText("deepseek/deepseek-v4-pro")
@@ -95,7 +95,7 @@ class TestUiFollowsCatalog:
 
     def test_switching_to_a_text_only_model_drops_attachments(self, window):
         window._on_catalog_loaded(CATALOG_FIXTURE, True)
-        window.model_combo.setCurrentText("x-ai/grok-4.3")
+        window.model_combo.setCurrentText("openai/gpt-5.6-luna")
         window.selected_images.append(("AAA", "image/png", "x.png"))
 
         window.model_combo.setCurrentText("deepseek/deepseek-v4-pro")
@@ -103,7 +103,7 @@ class TestUiFollowsCatalog:
 
     def test_missing_models_are_reported(self, window):
         """MODEL_CONFIGS の ID が提供終了していたら気づけるようにする。"""
-        window._on_catalog_loaded({"x-ai/grok-4.3": CATALOG_FIXTURE["x-ai/grok-4.3"]}, True)
+        window._on_catalog_loaded({"openai/gpt-5.6-luna": CATALOG_FIXTURE["openai/gpt-5.6-luna"]}, True)
         assert "未掲載" in window.statusBar().currentMessage()
 
     def test_failure_keeps_the_app_usable(self, window):
@@ -124,21 +124,21 @@ class TestReasoningParameters:
 
     def test_effort_is_sent(self):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        assert self.params("x-ai/grok-4.3", "xhigh") == {"reasoning": {"effort": "xhigh"}}
+        assert self.params("openai/gpt-5.6-luna", "xhigh") == {"reasoning": {"effort": "xhigh"}}
 
     def test_no_level_field(self):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        body = json.dumps(self.params("google/gemini-3-flash-preview", "high"))
+        body = json.dumps(self.params("deepseek/deepseek-v4-flash-0731", "high"))
         assert "level" not in body
 
     def test_effort_and_max_tokens_are_not_combined(self):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        body = json.dumps(self.params("google/gemini-3-flash-preview", "high"))
+        body = json.dumps(self.params("deepseek/deepseek-v4-flash-0731", "high"))
         assert "max_tokens" not in body
 
     def test_disabled_reasoning_sends_nothing(self):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
-        assert self.params("x-ai/grok-4.3", "high", use_reasoning=False) == {}
+        assert self.params("openai/gpt-5.6-luna", "high", use_reasoning=False) == {}
 
     def test_model_without_reasoning_sends_nothing(self):
         assert self.params("unknown/model", "high") == {}

@@ -64,7 +64,7 @@ class TestNoOutboundFetchOnRender:
         base, hits = trap_server
         window.conversation_history = [Message.assistant(
             f'<img src="{base}/from-model.png">',
-            model="x-ai/grok-4.3")]
+            model="openai/gpt-5.6-luna")]
         window._redraw_conversation()
         force_render(window.conversation_text, qapp)
 
@@ -73,7 +73,7 @@ class TestNoOutboundFetchOnRender:
     def test_markdown_image_syntax(self, qapp, window, trap_server):
         base, hits = trap_server
         window.conversation_history = [Message.assistant(
-            f"![説明]({base}/markdown.png)", model="x-ai/grok-4.3")]
+            f"![説明]({base}/markdown.png)", model="openai/gpt-5.6-luna")]
         window._redraw_conversation()
         force_render(window.conversation_text, qapp)
 
