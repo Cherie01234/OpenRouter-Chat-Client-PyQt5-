@@ -20,12 +20,12 @@ class TestSystemPromptPresets:
                             staticmethod(lambda *a, **k: (name, accepted)))
 
     def test_save_and_reload(self, window, monkeypatch):
-        window.system_prompt_input.setPlainText("あなたは小説の共作者です")
-        self._name_dialog(monkeypatch, "執筆用")
+        window.system_prompt_input.setPlainText("回答は簡潔にまとめてください")
+        self._name_dialog(monkeypatch, "簡潔モード")
         window._save_system_prompt_preset()
 
-        assert window._load_presets() == {"執筆用": "あなたは小説の共作者です"}
-        assert window.sp_preset_combo.findText("執筆用") > 0
+        assert window._load_presets() == {"簡潔モード": "回答は簡潔にまとめてください"}
+        assert window.sp_preset_combo.findText("簡潔モード") > 0
 
     def test_persisted_across_instances(self, make_window, monkeypatch):
         first = make_window()

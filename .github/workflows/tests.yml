@@ -6,7 +6,14 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    # 本番環境は Windows。Linux だけだと環境差の不具合を取り逃す
+    # （_is_busy() の競合は Linux でのみ顕在化した）
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +24,9 @@ jobs:
           python-version: "3.10"
 
       # PyQt5 のホイールは Qt 本体を同梱するが、
-      # 実行にはシステム側の共有ライブラリが必要
+      # Linux では実行にシステム側の共有ライブラリが必要
       - name: Install system libraries for Qt
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \

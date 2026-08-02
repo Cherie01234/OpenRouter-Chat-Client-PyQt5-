@@ -6,6 +6,8 @@ import sys
 import os
 import json
 import base64
+import re
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,7 +24,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QFont, QTextCursor, QPalette, QColor, QKeySequence, QTextDocument,
-    QTextCharFormat, QImage,
+    QTextCharFormat, QImage, QImageReader,
 )
 import requests
 import html
@@ -78,6 +80,10 @@ THINKING_LEVELS: list[str] = ["minimal", "low", "medium", "high", "xhigh"]
 # モデルカタログ（OpenRouter /api/v1/models から取得）
 # ═══════════════════════════════════════════════════════════════
 
+# 止まらないスレッドを抱えたまま打ち切ったときの終了コード。
+# 通常終了（0）と区別できるようにする
+FORCED_EXIT_CODE = 73
+
 MODELS_URL         = "https://openrouter.ai/api/v1/models"
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 
@@ -107,20 +113,49 @@ def parse_model_catalog(payload: dict) -> dict[str, dict]:
         model_id = entry.get("id")
         if not model_id:
             continue
-        params  = set(entry.get("supported_parameters") or [])
-        arch    = entry.get("architecture") or {}
-        top     = entry.get("top_provider") or {}
-        pricing = entry.get("pricing") or {}
+        params    = set(entry.get("supported_parameters") or [])
+        arch      = entry.get("architecture") or {}
+        top       = entry.get("top_provider") or {}
+        pricing   = entry.get("pricing") or {}
+        reasoning = entry.get("reasoning") or {}
+
+        # モデルごとに受け付ける effort は異なる。
+        # 一律の選択肢を出すと、UI の表示と実際の挙動が食い違う
+        efforts = [e for e in (reasoning.get("supported_efforts") or [])
+                   if isinstance(e, str)]
+
+        # 入力トークン数に応じた価格の切り替え（例: 20万トークン超で単価2倍）
+        overrides = []
+        for item in pricing.get("overrides") or []:
+            threshold = item.get("min_prompt_tokens")
+            price     = _to_float(item.get("prompt"))
+            if isinstance(threshold, int) and price is not None:
+                overrides.append((threshold, price))
+        overrides.sort()
+
         catalog[model_id] = {
             "supports_reasoning":      bool(params & {"reasoning", "include_reasoning"}),
-            "supports_thinking_level": "reasoning_effort" in params,
+            "supports_thinking_level": bool(efforts) or "reasoning_effort" in params,
+            "reasoning_efforts":       efforts,
+            "reasoning_default":       reasoning.get("default_effort"),
+            "reasoning_mandatory":     bool(reasoning.get("mandatory")),
             "context_length":          entry.get("context_length"),
             "max_completion_tokens":   top.get("max_completion_tokens"),
             "input_modalities":        list(arch.get("input_modalities") or []),
             "price_prompt":            _to_float(pricing.get("prompt")),
             "price_completion":        _to_float(pricing.get("completion")),
+            "price_overrides":         overrides,
         }
     return catalog
+
+
+def prompt_price(config: dict, tokens: int) -> float | None:
+    """入力トークン数に応じた単価。閾値を超える上書き価格があれば適用する。"""
+    price = config.get("price_prompt")
+    for threshold, override in config.get("price_overrides") or []:
+        if tokens >= threshold:
+            price = override
+    return price
 
 
 def catalog_cache_path() -> str:
@@ -257,11 +292,15 @@ _CONFIG_DEFAULTS = {
     "supports_reasoning":      False,
     "reasoning_type":          None,
     "supports_thinking_level": False,
+    "reasoning_efforts":       [],
+    "reasoning_default":       None,
+    "reasoning_mandatory":     False,
     "context_length":          None,
     "max_completion_tokens":   None,
     "input_modalities":        ["text"],
     "price_prompt":            None,
     "price_completion":        None,
+    "price_overrides":         [],
 }
 
 
@@ -324,6 +363,20 @@ UNKNOWN_ASSISTANT_COLOR = "#e8e8e8"
 # 保存フォーマットの版。1 = model/reasoning を持たない旧形式
 CONVERSATION_FORMAT_VERSION = 2
 
+# 応答の終わり方。表示と保存で区別する
+STATUS_COMPLETED = "completed"
+STATUS_CANCELLED = "cancelled"    # 利用者が中断した
+STATUS_TRUNCATED = "truncated"    # 出力上限に達して途中で切れた
+STATUS_FILTERED  = "filtered"     # コンテンツフィルタで打ち切られた
+STATUS_ERROR     = "error"        # finish_reason がエラーを示した
+
+STATUS_NOTES = {
+    STATUS_CANCELLED: "（キャンセルされました）",
+    STATUS_TRUNCATED: "（最大トークンに達したため、ここで途切れています）",
+    STATUS_FILTERED:  "（フィルタにより打ち切られました）",
+    STATUS_ERROR:     "（エラーで終了したため、ここで途切れています）",
+}
+
 
 @dataclass
 class Message:
@@ -339,6 +392,8 @@ class Message:
     reasoning: str = ""
     usage: dict = field(default_factory=dict)
     timestamp: str = ""
+    status: str = STATUS_COMPLETED              # 応答の終わり方
+    edited: bool = False                        # 編集モードで本文を書き換えたか
 
     # ── 生成 ──────────────────────────────────────────────────
 
@@ -348,10 +403,11 @@ class Message:
 
     @classmethod
     def assistant(cls, text: str, model: str | None = None,
-                  reasoning: str = "", usage: dict | None = None) -> "Message":
+                  reasoning: str = "", usage: dict | None = None,
+                  status: str = STATUS_COMPLETED) -> "Message":
         return cls("assistant", [{"type": "text", "text": text}],
                    model=model, reasoning=reasoning,
-                   usage=usage or {}, timestamp=_now())
+                   usage=usage or {}, timestamp=_now(), status=status)
 
     @classmethod
     def system(cls, text: str) -> "Message":
@@ -398,6 +454,10 @@ class Message:
             data["usage"] = self.usage
         if self.timestamp:
             data["timestamp"] = self.timestamp
+        if self.status != STATUS_COMPLETED:
+            data["status"] = self.status
+        if self.edited:
+            data["edited"] = True
         return data
 
     @classmethod
@@ -410,11 +470,33 @@ class Message:
             reasoning = data.get("reasoning") or "",
             usage     = data.get("usage") or {},
             timestamp = data.get("timestamp") or "",
+            status    = data.get("status") or STATUS_COMPLETED,
+            edited    = bool(data.get("edited")),
         )
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+# QTextEdit へ埋め込んでよい画像形式。
+# svg は外部リソースを参照しうるため除外する。
+SAFE_IMAGE_MEDIATYPES = {
+    "image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp",
+}
+
+
+def is_safe_image_url(url: str) -> bool:
+    """埋め込み data: URI で、かつ許可した画像形式かどうか。"""
+    value = (url or "").strip()
+    if not value.lower().startswith("data:image/"):
+        return False
+    # 正規の data URI に引用符・空白・山括弧は現れない。
+    # 混じっていれば属性を抜け出す細工とみなして弾く
+    if any(ch in value for ch in '"\'<>' ) or any(ch.isspace() for ch in value):
+        return False
+    mediatype = value[len("data:"):].split(";", 1)[0].split(",", 1)[0]
+    return mediatype.lower() in SAFE_IMAGE_MEDIATYPES
 
 
 class _HtmlSanitizer(HTMLParser):
@@ -426,7 +508,12 @@ class _HtmlSanitizer(HTMLParser):
     許可タグ以外はタグのみ剥がして中身のテキストは残す（unwrap）。
     """
 
-    _VOID_TAGS = {"br", "hr", "img"}
+    # 閉じタグを持たない要素。skip スタックへ積んではいけない
+    # （積むと閉じタグが来ないまま以降の本文がすべて捨てられる）
+    _VOID_TAGS = {
+        "br", "hr", "img", "link", "meta", "input", "source",
+        "col", "wbr", "area", "base", "param", "track", "embed",
+    }
 
     _ALLOWED_TAGS = {
         "p", "br", "hr", "div", "span",
@@ -453,18 +540,18 @@ class _HtmlSanitizer(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self._out: list[str] = []
-        self._skip_depth = 0
+        # 破棄中のタグ名スタック。単なる深さカウンタだと、無関係な終了タグ
+        # （<iframe>…</embed> など）で破棄が解除されてしまう
+        self._skip_stack: list[str] = []
 
     def result(self) -> str:
         return "".join(self._out)
 
     @staticmethod
     def _is_safe_url(attr: str, value: str) -> bool:
-        url = value.strip().lower()
         if attr == "src":
-            # 画像は埋め込み data: のみ許可（http(s)/file は外部・ローカル取得になる）
-            return url.startswith("data:image/")
-        return url.startswith(("http://", "https://", "mailto:"))
+            return is_safe_image_url(value)
+        return value.strip().lower().startswith(("http://", "https://", "mailto:"))
 
     def _clean_attrs(self, tag: str, attrs) -> str:
         allowed = self._ALLOWED_ATTRS.get(tag, frozenset())
@@ -481,9 +568,11 @@ class _HtmlSanitizer(HTMLParser):
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
         if tag in self._DROP_CONTENT_TAGS:
-            self._skip_depth += 1
+            # <link> や <meta> は閉じタグを持たないため、積むと戻らなくなる
+            if tag not in self._VOID_TAGS:
+                self._skip_stack.append(tag)
             return
-        if self._skip_depth or tag not in self._ALLOWED_TAGS:
+        if self._skip_stack or tag not in self._ALLOWED_TAGS:
             return
         cleaned = self._clean_attrs(tag, attrs)
         if tag == "img" and "src=" not in cleaned:
@@ -492,19 +581,25 @@ class _HtmlSanitizer(HTMLParser):
         self._out.append(f"<{tag}{cleaned}{slash}>")
 
     def handle_startendtag(self, tag, attrs):
+        # <iframe/> のような自己終了形は中身を持たないので、積まずに捨てる
+        if tag.lower() in self._DROP_CONTENT_TAGS:
+            return
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
-        if tag in self._DROP_CONTENT_TAGS:
-            self._skip_depth = max(0, self._skip_depth - 1)
+        if self._skip_stack:
+            # 対応する開始タグまで戻す。無関係な終了タグでは解除しない
+            if tag in self._skip_stack:
+                while self._skip_stack and self._skip_stack.pop() != tag:
+                    pass
             return
-        if self._skip_depth or tag not in self._ALLOWED_TAGS or tag in self._VOID_TAGS:
+        if tag not in self._ALLOWED_TAGS or tag in self._VOID_TAGS:
             return
         self._out.append(f"</{tag}>")
 
     def handle_data(self, data):
-        if not self._skip_depth:
+        if not self._skip_stack:
             self._out.append(html.escape(data, quote=False))
 
 
@@ -570,7 +665,21 @@ class ConversationView(QTextEdit):
     会話表示エリア。
     - Ctrl+ホイール: フォントサイズ変更
     - 右クリックメニュー: コピー機能拡張
+    - 外部・ローカルのリソースは読み込まない（loadResource）
     """
+
+    def loadResource(self, resource_type, url):
+        """
+        埋め込み data: 以外のリソースを一切読み込まない。
+
+        QTextEdit は表示時にここを通して画像などを取りに行き、
+        http/https なら通信し、ローカルパスならファイルを開く（実測確認済み）。
+        入口のサニタイズだけで守ると、HTML を差し込む経路が増えるたびに
+        塞ぎ直しが要る。実際に読む直前で止めれば、経路によらず効く。
+        """
+        if url.scheme().lower() != "data":
+            return None
+        return super().loadResource(resource_type, url)
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.ControlModifier:
@@ -685,15 +794,15 @@ class ApiWorker(QThread):
     # NOTE: シグナル名を "finished" にすると QThread 本来の finished シグナルを
     #       Python 側から覆い隠してしまい、スレッド終了の検知や
     #       deleteLater による後始末ができなくなる。必ず別名にすること。
-    chunk_received    = pyqtSignal(str)              # ストリーミング差分テキスト
-    response_finished = pyqtSignal(str, dict, bool)  # (reasoning, usage, cancelled)
+    chunk_received    = pyqtSignal(str)             # ストリーミング差分テキスト
+    response_finished = pyqtSignal(str, dict, str)  # (reasoning, usage, status)
     error             = pyqtSignal(str)
 
     URL = "https://openrouter.ai/api/v1/chat/completions"
 
     def __init__(self, api_key: str, messages: list, use_reasoning: bool,
                  temperature: float, max_tokens: int, model: str,
-                 thinking_level: str = "medium"):
+                 thinking_level: str = "medium", model_config: dict | None = None):
         super().__init__()
         self.api_key       = api_key
         self.messages      = messages
@@ -702,6 +811,8 @@ class ApiWorker(QThread):
         self.max_tokens    = max_tokens
         self.model         = model
         self.thinking_level = thinking_level
+        # カタログはワーカー実行中に差し替わりうるので、開始時点の内容を持つ
+        self.model_config  = model_config or get_model_config(model)
 
     # ── 中断 ──────────────────────────────────────────────────
 
@@ -730,10 +841,11 @@ class ApiWorker(QThread):
         仕様上 effort と max_tokens は排他で、level というフィールドは存在しない。
         effort に一本化する（未対応モデルには enabled だけ送る）。
         """
-        cfg = get_model_config(self.model)
+        cfg = self.model_config
         if not self.use_reasoning or not cfg["supports_reasoning"]:
             return {}
-        if cfg["supports_thinking_level"] and self.thinking_level in THINKING_LEVELS:
+        allowed = cfg.get("reasoning_efforts") or THINKING_LEVELS
+        if cfg["supports_thinking_level"] and self.thinking_level in allowed:
             return {"reasoning": {"effort": self.thinking_level}}
         return {"reasoning": {"enabled": True}}
 
@@ -746,6 +858,7 @@ class ApiWorker(QThread):
         response       = None
         full_reasoning = ""
         usage: dict    = {}
+        finish_reason  = ""
 
         try:
             headers = {
@@ -783,27 +896,43 @@ class ApiWorker(QThread):
                 if not line.startswith("data: "):
                     continue
                 try:
-                    data  = json.loads(line[6:])
-                    delta = data["choices"][0].get("delta", {})
+                    data = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
 
-                    # コンテンツチャンク
-                    chunk = delta.get("content") or ""
-                    if chunk:
-                        self.chunk_received.emit(chunk)
+                # 途中エラーは HTTP 200 の SSE として届く。
+                # 見落とすと部分本文を「完了」として扱ってしまう
+                err = data.get("error")
+                if err:
+                    message = err.get("message") if isinstance(err, dict) else str(err)
+                    self.error.emit(f"APIエラー（応答の途中）: {message}")
+                    return
 
-                    # 推論テキストの収集
-                    for key in ("reasoning", "reasoning_content", "reasoning_text"):
-                        r = delta.get(key, "") or ""
-                        if r:
-                            full_reasoning += r
-                            break
+                # usage は choices が空のチャンクで届くことがある。
+                # choices を先に読むと IndexError で usage ごと落とす
+                if data.get("usage"):
+                    usage = data["usage"]
 
-                    # 使用量（最終チャンクに含まれることが多い）
-                    if data.get("usage"):
-                        usage = data["usage"]
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0] or {}
+                delta  = choice.get("delta") or {}
 
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    pass
+                # コンテンツチャンク
+                chunk = delta.get("content") or ""
+                if chunk:
+                    self.chunk_received.emit(chunk)
+
+                # 推論テキストの収集
+                for key in ("reasoning", "reasoning_content", "reasoning_text"):
+                    r = delta.get(key, "") or ""
+                    if r:
+                        full_reasoning += r
+                        break
+
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
 
         except requests.exceptions.Timeout:
             if not self.isInterruptionRequested():
@@ -825,7 +954,7 @@ class ApiWorker(QThread):
 
         # 推論ヘッダーの付加
         if full_reasoning:
-            cfg = get_model_config(self.model)
+            cfg = self.model_config
             r_tok = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") \
                 or usage.get("reasoning_tokens", 0)
             if r_tok:
@@ -837,9 +966,20 @@ class ApiWorker(QThread):
                     f"【思考レベル: {self.thinking_level}】\n\n" + full_reasoning
                 )
 
-        self.response_finished.emit(
-            full_reasoning, usage, self.isInterruptionRequested()
-        )
+        if self.isInterruptionRequested():
+            status = STATUS_CANCELLED
+        elif finish_reason == "length":
+            status = STATUS_TRUNCATED       # 出力上限に達して途中で切れた
+        elif finish_reason == "content_filter":
+            status = STATUS_FILTERED
+        elif finish_reason == "error":
+            # 正式な途中エラーはトップレベル error で先に処理される。
+            # ここへ来るのは finish_reason だけがエラーを示した場合
+            status = STATUS_ERROR
+        else:
+            status = STATUS_COMPLETED
+
+        self.response_finished.emit(full_reasoning, usage, status)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -884,10 +1024,16 @@ class OpenRouterChatApp(QMainWindow):
 
         # リトライ用
         self._last_api_messages: list[dict] = []
+        # 再生成中に退避しておく元の応答（失敗したら戻す）
+        self._regen_backup: Message | None = None
+        # 直前に送った user 発言（0チャンクで中断したら取り下げる）
+        self._pending_user_message: Message | None = None
 
         # 保存状態（Ctrl+S の上書き先と、未保存変更の有無）
         self._current_path: str | None = None
         self._dirty = False
+        # 終了時に止まりきらなかったスレッドが残ったか（main() が終了方法を選ぶ）
+        self.threads_pending = False
 
         # 検索ダイアログ
         self._search_dialog: SearchDialog | None = None
@@ -916,6 +1062,7 @@ class OpenRouterChatApp(QMainWindow):
         root.addWidget(self._build_conversation_area())    # スプリッタ
         root.addWidget(self._build_system_prompt_area())   # 折りたたみ式SP欄
         root.addWidget(self._build_input_area())           # 入力エリア全体
+        self._align_input_widths()
 
         # ショートカット
         QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self._open_search)
@@ -963,7 +1110,10 @@ class OpenRouterChatApp(QMainWindow):
 
     def _build_system_prompt_area(self) -> QFrame:
         frame = QFrame()
+        self.sp_frame = frame
+        self._sp_expanded = False
         layout = QVBoxLayout(frame)
+        # 左右の余白は _align_input_widths() で入力欄に合わせて上書きする
         layout.setContentsMargins(0, 2, 0, 0)
         layout.setSpacing(2)
 
@@ -1004,16 +1154,42 @@ class OpenRouterChatApp(QMainWindow):
         self.system_prompt_input.setMaximumHeight(70)
         self.system_prompt_input.setStyleSheet(INPUT_STYLE)
         self.system_prompt_input.setVisible(False)
+        # 会話JSONへ保存する対象なので、変更は未保存として扱う
+        self.system_prompt_input.textChanged.connect(self._mark_dirty)
         layout.addWidget(self.system_prompt_input)
 
         return frame
 
+    def _align_input_widths(self):
+        """
+        システムプロンプト欄の左右をメッセージ入力欄に揃える。
+
+        入力欄は枠付き QFrame の内側にあるのに対し、システムプロンプト欄は
+        ルート直下に置かれているため、放っておくと枠と内側余白の分だけ
+        システムプロンプト欄のほうが横に長くなる。
+        余白の既定値はスタイルによって変わるので、実際の値から算出する。
+        """
+        inset = self.input_frame.frameWidth() \
+            + self.input_frame.layout().contentsMargins().left()
+        margins = self.sp_frame.layout().contentsMargins()
+        self.sp_frame.layout().setContentsMargins(
+            inset, margins.top(), inset, margins.bottom()
+        )
+
     def _toggle_system_prompt(self):
-        visible = self.system_prompt_input.isVisible()
-        self.system_prompt_input.setVisible(not visible)
-        self.sp_preset_row.setVisible(not visible)
+        self._set_system_prompt_expanded(not self._sp_expanded)
+
+    def _set_system_prompt_expanded(self, expanded: bool):
+        """
+        開閉状態は自前で持つ。isVisible() は親ウィンドウが未表示のあいだ
+        常に False を返すため、判定の根拠に使えない。
+        """
+        self._sp_expanded = expanded
+        self.system_prompt_input.setVisible(expanded)
+        self.sp_preset_row.setVisible(expanded)
+        self.sp_toggle.setChecked(expanded)     # コードから呼んだ場合に備える
         self.sp_toggle.setText(
-            "▼ システムプロンプト" if not visible else "▶ システムプロンプト"
+            "▼ システムプロンプト" if expanded else "▶ システムプロンプト"
         )
 
     # ── システムプロンプトのプリセット ────────────────────────
@@ -1119,6 +1295,7 @@ class OpenRouterChatApp(QMainWindow):
 
     def _build_input_area(self) -> QFrame:
         frame = QFrame()
+        self.input_frame = frame
         frame.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(frame)
         layout.setSpacing(4)
@@ -1175,8 +1352,15 @@ class OpenRouterChatApp(QMainWindow):
         self.thinking_level_combo.setEnabled(False)
         layout.addWidget(self.thinking_level_combo)
 
-        self.reasoning_checkbox = QCheckBox("推論プロセスを表示")
+        # 実際に制御しているのは「reasoning パラメータを送るかどうか」で、
+        # 推論欄の表示・収集は常に行われる。ラベルを動作に合わせる
+        self.reasoning_checkbox = QCheckBox("推論を要求")
         self.reasoning_checkbox.setChecked(True)
+        self.reasoning_checkbox.setToolTip(
+            "オンのとき、思考レベルを指定して推論を要求します。\n"
+            "オフにすると推論パラメータを送りません（モデルの既定で\n"
+            "推論が有効になる場合があります）。"
+        )
         layout.addWidget(self.reasoning_checkbox)
 
         layout.addWidget(QLabel("ランダム性:"))
@@ -1258,9 +1442,9 @@ class OpenRouterChatApp(QMainWindow):
         sp = s.value("system_prompt", "")
         if sp:
             self.system_prompt_input.setPlainText(sp)
-            # SP欄を自動展開
-            self.system_prompt_input.setVisible(True)
-            self.sp_toggle.setText("▼ システムプロンプト")
+            self._set_system_prompt_expanded(True)      # 中身があれば開いておく
+        # 起動時の復元は「変更」ではない
+        self._mark_dirty(False)
 
     def _save_settings(self):
         s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
@@ -1282,6 +1466,7 @@ class OpenRouterChatApp(QMainWindow):
         self.thinking_level_combo.setEnabled(
             cfg["supports_reasoning"] and cfg["supports_thinking_level"]
         )
+        self._refresh_thinking_levels(cfg)
 
         # 出力上限をモデルに合わせる（超えると API エラーになる）
         max_out = cfg["max_completion_tokens"]
@@ -1304,6 +1489,29 @@ class OpenRouterChatApp(QMainWindow):
             self.statusBar().showMessage(
                 f"{cfg['display_name']} — 推論機能は利用できません"
             )
+
+    def _refresh_thinking_levels(self, config: dict):
+        """
+        思考レベルの選択肢をモデルに合わせる。
+
+        受け付ける effort はモデルごとに違う（DeepSeek に minimal は無く、
+        Grok に xhigh は無い）。一律の選択肢を出すと表示と実挙動が食い違う。
+        """
+        levels = config.get("reasoning_efforts") or THINKING_LEVELS
+        current = self.thinking_level_combo.currentText()
+        if [self.thinking_level_combo.itemText(i)
+                for i in range(self.thinking_level_combo.count())] == list(levels):
+            return
+
+        self.thinking_level_combo.blockSignals(True)
+        self.thinking_level_combo.clear()
+        self.thinking_level_combo.addItems(levels)
+        # 直前の選択を保てないときはモデルの既定値へ落とす
+        for candidate in (current, config.get("reasoning_default"), "medium"):
+            if candidate and candidate in levels:
+                self.thinking_level_combo.setCurrentText(candidate)
+                break
+        self.thinking_level_combo.blockSignals(False)
 
     def _update_image_support(self):
         """画像を受け付けないモデルでは添付ボタンを塞ぐ。"""
@@ -1376,19 +1584,59 @@ class OpenRouterChatApp(QMainWindow):
             self._attach_image_file(path)
         self._update_image_info()
 
+    # 添付は履歴に残り、以降のターンで毎回再送される。
+    # 上限が無いと、気づかないうちに毎ターンの入力コストが跳ね上がる
+    MAX_IMAGE_BYTES = 4 * 1024 * 1024
+    MAX_IMAGE_COUNT = 8
+
+    # QImageReader が返す形式名 → MIME
+    _FORMAT_MIME = {
+        "png": "image/png", "jpeg": "image/jpeg", "jpg": "image/jpeg",
+        "gif": "image/gif", "bmp": "image/bmp", "webp": "image/webp",
+    }
+
     def _attach_image_file(self, path: str) -> bool:
+        name = os.path.basename(path)
+        if len(self.selected_images) >= self.MAX_IMAGE_COUNT:
+            self._make_dialog(
+                "添付できません",
+                f"画像は同時に {self.MAX_IMAGE_COUNT} 枚までです。",
+            ).exec_()
+            return False
+        try:
+            size = os.path.getsize(path)
+        except OSError as exc:
+            self._make_dialog("画像読み込みエラー", f"{name}\n{exc}").exec_()
+            return False
+        if size > self.MAX_IMAGE_BYTES:
+            self._make_dialog(
+                "サイズ超過",
+                f"{name} は {size / 1024 / 1024:.1f}MB あります。\n"
+                f"{self.MAX_IMAGE_BYTES // 1024 // 1024}MB までにしてください。\n"
+                "（添付画像は以降のターンでも毎回送信されます）",
+            ).exec_()
+            return False
+
+        # 拡張子ではなく中身で判定する。拡張子任せだと、画像でないファイルを
+        # image/jpeg と偽って送ってしまう
+        image_format = bytes(QImageReader(path).format()).decode("ascii", "ignore").lower()
+        mime = self._FORMAT_MIME.get(image_format)
+        if not mime:
+            self._make_dialog(
+                "画像として読み込めません",
+                f"{name} は対応している画像形式ではありません。",
+            ).exec_()
+            return False
+
         try:
             with open(path, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode("utf-8")
-            ext  = os.path.splitext(path)[1].lower()
-            mime = self._EXT_MIME.get(ext, "image/jpeg")
-            self.selected_images.append((b64, mime, os.path.basename(path)))
-            return True
-        except Exception as exc:
-            self._make_dialog(
-                "画像読み込みエラー", f"{path}\n読み込みに失敗しました: {exc}"
-            ).exec_()
+        except OSError as exc:
+            self._make_dialog("画像読み込みエラー", f"{name}\n{exc}").exec_()
             return False
+
+        self.selected_images.append((b64, mime, name))
+        return True
 
     # ── 貼り付け・ドロップ ────────────────────────────────────
 
@@ -1466,6 +1714,11 @@ class OpenRouterChatApp(QMainWindow):
         if not supports_images(self.model_combo.currentText()):
             self.statusBar().showMessage("このモデルは画像入力に対応していません")
             return False
+        if len(self.selected_images) >= self.MAX_IMAGE_COUNT:
+            self.statusBar().showMessage(
+                f"画像は同時に {self.MAX_IMAGE_COUNT} 枚までです"
+            )
+            return False
         image = QImage(mime.imageData())
         if image.isNull():
             return False
@@ -1477,7 +1730,20 @@ class OpenRouterChatApp(QMainWindow):
         if not image.save(buffer, "PNG"):
             return False
         buffer.close()
-        b64 = base64.b64encode(bytes(buffer.data())).decode("utf-8")
+
+        # ファイル添付と同じ上限を貼り付け経路にも掛ける。
+        # 画面全体のスクリーンショットなどは容易に数MBになる
+        data = bytes(buffer.data())
+        if len(data) > self.MAX_IMAGE_BYTES:
+            self._make_dialog(
+                "サイズ超過",
+                f"貼り付けた画像は {len(data) / 1024 / 1024:.1f}MB あります。\n"
+                f"{self.MAX_IMAGE_BYTES // 1024 // 1024}MB までにしてください。\n"
+                "（添付画像は以降のターンでも毎回送信されます）",
+            ).exec_()
+            return False
+
+        b64 = base64.b64encode(data).decode("utf-8")
         index = sum(1 for img in self.selected_images
                     if img[2].startswith("clipboard")) + 1
         self.selected_images.append((b64, "image/png", f"clipboard-{index}.png"))
@@ -1500,8 +1766,10 @@ class OpenRouterChatApp(QMainWindow):
         except OSError:
             return False
 
-        name  = os.path.basename(path)
-        fence = "````" if "```" in body else "```"
+        name = os.path.basename(path)
+        # 本文中の最長のバッククォート連より 1 本長くしないと閉じてしまう
+        longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+        fence = "`" * max(3, longest + 1)
         block = f"\n{name}:\n{fence}\n{body.rstrip()}\n{fence}\n"
 
         cursor = self.message_input.textCursor()
@@ -1517,7 +1785,13 @@ class OpenRouterChatApp(QMainWindow):
     def _update_image_info(self):
         if self.selected_images:
             names = ", ".join(img[2] for img in self.selected_images)
-            self.image_info_label.setText(f"選択された画像: {names}")
+            # base64 は元データの約 4/3。毎ターン再送されるので目安を出す
+            total = sum(len(img[0]) for img in self.selected_images) * 3 // 4
+            self.image_info_label.setText(
+                f"選択された画像: {names}"
+                f"（{len(self.selected_images)}/{self.MAX_IMAGE_COUNT} 枚, "
+                f"計 {total / 1024:.0f}KB・毎ターン送信）"
+            )
         else:
             self.image_info_label.setText("選択された画像: なし")
 
@@ -1571,6 +1845,7 @@ class OpenRouterChatApp(QMainWindow):
             })
 
         message = Message.user(content)
+        self._pending_user_message = message     # 0チャンクで中断したら取り下げる
         self.conversation_history.append(message)
         self._append_message(message)
         self._clear_images()
@@ -1596,10 +1871,20 @@ class OpenRouterChatApp(QMainWindow):
             max_tokens     = self.max_tokens_spin.value(),
             model          = model_id,
             thinking_level = self.thinking_level_combo.currentText(),
+            model_config   = cfg,          # 実行中のカタログ差し替えに影響されない
         )
+        # NOTE: これらのハンドラに @pyqtSlot を付けてはいけない。
+        # 付けるとネイティブ Qt 経路になり、disconnect 済みでもキュー済みの
+        # シグナルが後着しうる（通常の Python メソッドなら PyQt が内部プロキシを
+        # 削除し、未配送イベントも一緒に消える。tests/test_qt_signal_semantics.py
+        # で検証している）。付けるならリクエスト世代の判定を同時に入れること。
         self.worker.chunk_received.connect(self._on_chunk_received)
         self.worker.response_finished.connect(self._on_stream_finished)
         self.worker.error.connect(self._handle_api_error)
+        # 後始末は生成時に繋ぐ。切り離し時に繋ぐと、その直前に終了した場合に
+        # finished を取り逃がしてリストへ残り続ける
+        worker = self.worker
+        worker.finished.connect(lambda: self._discard_worker(worker))
         self._request_active = True
         self.worker.start()
 
@@ -1621,7 +1906,7 @@ class OpenRouterChatApp(QMainWindow):
         if not self._is_busy():
             return
         self._detach_worker()
-        self._on_stream_finished("", {}, cancelled=True)
+        self._on_stream_finished("", {}, STATUS_CANCELLED)
 
     def _detach_worker(self):
         """
@@ -1644,9 +1929,13 @@ class OpenRouterChatApp(QMainWindow):
         """
         見捨てたスレッドを、実際に終了するまで保持する。
         参照を落とすと実行中の QThread が GC され、プロセスごと落ちる。
+
+        後始末の接続は生成時に済ませてある（_start_request）。
+        ここへ来る前に終了していると finished を取り逃がすため、念のため確認する。
         """
         self._retired_workers.append(worker)
-        worker.finished.connect(lambda: self._discard_worker(worker))
+        if not worker.isRunning():
+            self._discard_worker(worker)
 
     def _discard_worker(self, worker: ApiWorker):
         if worker in self._retired_workers:
@@ -1712,9 +2001,22 @@ class OpenRouterChatApp(QMainWindow):
         self._stream_placeholder = False
 
     def _on_stream_finished(self, reasoning: str, usage: dict,
-                            cancelled: bool = False):
+                            status: str = STATUS_COMPLETED):
         self._request_active = False
         self._reset_stream_state()
+        cancelled = status == STATUS_CANCELLED
+
+        # 再生成を中断した場合は、部分的な新案より元の応答を残す
+        if cancelled and self._regen_backup is not None:
+            cursor = QTextCursor(self.conversation_text.document())
+            cursor.setPosition(self._stream_message_start)
+            cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            self._restore_regen_backup()
+            self.send_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
+            return
+        self._regen_backup = None
 
         bar       = self.conversation_text.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
@@ -1725,24 +2027,30 @@ class OpenRouterChatApp(QMainWindow):
             cursor.setPosition(self._stream_message_start)
             cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
             cursor.removeSelectedText()
+            # 未回答の user 発言だけが残ると、次の送信で user が連続する。
+            # 送った内容を入力欄へ戻し、送信前の状態に近づける
+            self._take_back_pending_message()
         else:
             # プレーンテキスト部分（"▌" 含む）を Markdown HTML で置き換え
             cursor.setPosition(self._stream_content_start)
             cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
             cursor.removeSelectedText()
             cursor.insertHtml(render_markdown(self._stream_buffer))
-            if cancelled:
+            note = STATUS_NOTES.get(status)
+            if note:
                 cursor.insertHtml(
-                    " <i><font color='#888888'>（キャンセルされました）</font></i>"
+                    f" <i><font color='#888888'>{html.escape(note)}</font></i>"
                 )
             cursor.insertHtml("<br><br>")
 
             # 履歴に保存。キャンセル時も画面に残す以上、履歴と食い違わせない。
+            # 終わり方は status として残す（再描画・保存でも失われない）
             self.conversation_history.append(Message.assistant(
                 self._stream_buffer,
                 model     = self._stream_model,
                 reasoning = reasoning,
                 usage     = usage,
+                status    = status,
             ))
 
         if at_bottom:
@@ -1758,8 +2066,13 @@ class OpenRouterChatApp(QMainWindow):
                 else "このモデルは推論機能をサポートしていません"
             )
 
-        if cancelled:
-            self.statusBar().showMessage("キャンセルしました")
+        if status in STATUS_NOTES:
+            self.statusBar().showMessage(
+                {STATUS_CANCELLED: "キャンセルしました",
+                 STATUS_TRUNCATED: "最大トークンに達したため、応答が途中で終了しました",
+                 STATUS_FILTERED:  "応答がフィルタにより打ち切られました",
+                 STATUS_ERROR:     "応答がエラーで終了しました"}[status]
+            )
         else:
             # ステータスバーにトークン使用量とコストを表示
             p_tok = usage.get("prompt_tokens",     "?")
@@ -1793,6 +2106,8 @@ class OpenRouterChatApp(QMainWindow):
         self.statusBar().showMessage(f"エラー: {error_message}")
         self.send_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        # 再生成が失敗したなら、退避した元の応答を戻す
+        self._restore_regen_backup()
         self._update_usage_label()
 
         # 再試行ダイアログ
@@ -1822,7 +2137,12 @@ class OpenRouterChatApp(QMainWindow):
         )
 
     def _regenerate(self):
-        """直前の応答を捨てて、同じ入力で応答し直す。"""
+        """
+        直前の応答を捨てて、同じ入力で応答し直す。
+
+        旧応答は生成が成功するまで手元に残す。失敗・中断したときに
+        元の応答まで失うと、書き直しの素材ごと消えてしまう。
+        """
         if self._is_busy():
             self.statusBar().showMessage("応答中です")
             return
@@ -1832,7 +2152,7 @@ class OpenRouterChatApp(QMainWindow):
             self.statusBar().showMessage("再生成できる応答がありません")
             return
 
-        self.conversation_history.pop()
+        self._regen_backup = self.conversation_history.pop()
         self._redraw_conversation()
         self._show_last_reasoning()
         self._update_usage_label()
@@ -1840,6 +2160,39 @@ class OpenRouterChatApp(QMainWindow):
 
         self._last_api_messages = self._build_api_messages()
         self._start_request(self._last_api_messages)
+
+    def _take_back_pending_message(self):
+        """
+        一文字も応答が来ないうちに中断した場合、直前に送った user 発言を
+        履歴から取り下げ、本文を入力欄へ戻す。
+        """
+        pending = self._pending_user_message
+        self._pending_user_message = None
+        if pending is None or not self.conversation_history:
+            return
+        if self.conversation_history[-1] is not pending:
+            return          # 途中で履歴が変わっているので触らない
+
+        self.conversation_history.pop()
+        self._redraw_conversation()
+        if pending.text:
+            existing = self.message_input.toPlainText()
+            self.message_input.setPlainText(
+                f"{pending.text}\n{existing}" if existing else pending.text
+            )
+        self.statusBar().showMessage("送信を取り消し、入力内容を戻しました")
+
+    def _restore_regen_backup(self) -> bool:
+        """再生成に失敗した場合、退避しておいた旧応答を戻す。"""
+        if self._regen_backup is None:
+            return False
+        self.conversation_history.append(self._regen_backup)
+        self._regen_backup = None
+        self._redraw_conversation()
+        self._show_last_reasoning()
+        self._update_usage_label()
+        self.statusBar().showMessage("再生成を取り消し、元の応答に戻しました")
+        return True
 
     # ══════════════════════════════════════════════════════════
     # 使用量・コスト表示
@@ -1880,7 +2233,8 @@ class OpenRouterChatApp(QMainWindow):
                 piece += f" / {int(limit):,} ({tokens / int(limit):.1%})"
             pieces.append(piece)
 
-            price = cfg["price_prompt"]
+            # 入力量に応じて単価が上がるモデルがあるため、閾値を考慮する
+            price = prompt_price(cfg, tokens)
             if price:
                 # 会話が伸びるほど、毎ターンこの額が入力分として発生する
                 pieces.append(f"次回入力: 約 {_format_cost(tokens * price)}")
@@ -1902,12 +2256,14 @@ class OpenRouterChatApp(QMainWindow):
             message.display_name, message.content,
             is_user=(message.role == "user"),
             scroll=scroll, color=message.color,
+            note=STATUS_NOTES.get(message.status),
         )
 
     def _append_to_conversation(
         self, sender: str, content,
         is_user: bool = False, scroll: bool = True,
         color: str = UNKNOWN_ASSISTANT_COLOR,
+        note: str | None = None,
     ):
         """
         会話表示エリアにメッセージを追加する。
@@ -1929,12 +2285,24 @@ class OpenRouterChatApp(QMainWindow):
                     else render_markdown(text)
                 )
             elif ptype == "image_url":
-                url = part.get("image_url", {}).get("url", "")
-                if url.startswith("data:"):
+                # 読み込んだ会話ファイル由来の値なので、検証もエスケープもせずに
+                # 属性へ埋め込むと、属性を閉じて外部画像を差し込まれる
+                url = (part.get("image_url") or {}).get("url", "")
+                if is_safe_image_url(url):
                     cursor.insertHtml(
-                        f'<img src="{url}" width="200" '
+                        f'<img src="{html.escape(url, quote=True)}" width="200" '
                         f'style="max-width:200px;max-height:200px;margin:5px;">'
                     )
+                elif url:
+                    cursor.insertHtml(
+                        "<i><font color='#e88080'>"
+                        "（対応していない形式の画像のため表示できません）</font></i>"
+                    )
+
+        if note:
+            cursor.insertHtml(
+                f" <i><font color='#888888'>{html.escape(note)}</font></i>"
+            )
 
         if not self.is_editing:
             cursor.insertHtml("<br><br>")
@@ -1972,85 +2340,155 @@ class OpenRouterChatApp(QMainWindow):
     # 編集モード
     # ══════════════════════════════════════════════════════════
 
-    _LABEL_TO_ROLE = {
-        "あなた:":     "user",
-        "アシスタント:": "assistant",
-        "システム:":   "system",
-    }
+    # 区切りは自然文に現れない形にする。
+    # 旧実装は行頭の「あなた:」等で切っていたため、本文に二人称の呼びかけや
+    # 台本形式が含まれると、そこでメッセージが分割・改役されていた。
+    # 末尾には表示名（モデル名）が続くので、role の後ろは緩く受ける
+    _EDIT_DELIMITER_RE = re.compile(
+        r"^─{3,}\s*メッセージ\s*(?P<index>\d+)\s*"
+        r"\[(?P<role>user|assistant|system)\].*$"
+    )
+
+    @staticmethod
+    def _edit_delimiter(index: int, message: Message) -> str:
+        return (f"──── メッセージ {index} [{message.role}] "
+                f"{message.display_name} ────")
 
     def _toggle_edit_mode(self):
+        # 応答中に編集へ入ると、文書を作り替えてストリーム位置が壊れる。
+        # 終了側は塞がない（入れない以上、応答中に編集中になることはない）
+        if not self.is_editing and self._is_busy():
+            self.edit_button.setChecked(False)
+            self.statusBar().showMessage("応答中は編集モードに入れません")
+            return
+
         self.is_editing = not self.is_editing
         self.conversation_text.setReadOnly(not self.is_editing)
+
+        # コードから呼ばれた場合、ボタンの押下状態が実際とずれる
+        self.edit_button.setChecked(self.is_editing)
 
         if self.is_editing:
             self.edit_button.setText("編集終了")
             self.statusBar().showMessage(
-                "編集モード: 会話を直接編集できます（画像情報は失われます）"
+                "編集モード: 区切り行はそのまま残してください（画像情報は失われます）"
             )
-            parts = []
-            for msg in self.conversation_history:
-                label = {"user": "あなた", "assistant": "アシスタント"}.get(
-                    msg.role, "システム"
-                )
-                parts.append(f"{label}: {msg.text}")
-            self.conversation_text.setPlainText("\n\n".join(parts))
+            self.conversation_text.setPlainText(self._serialize_for_editing())
         else:
             self.edit_button.setText("編集モード")
             self.statusBar().showMessage("編集モードを終了しました")
             self._sync_history_from_editor()
 
+    def _serialize_for_editing(self) -> str:
+        """
+        履歴を編集用のプレーンテキストにする。
+        本文は一切加工しない（字下げの全角スペースや末尾の空行も保つ）。
+        """
+        lines: list[str] = []
+        for index, message in enumerate(self.conversation_history, 1):
+            if lines:
+                lines.append("")        # メッセージ間の区切り（ちょうど1行）
+            lines.append(self._edit_delimiter(index, message))
+            lines.extend(message.text.split("\n"))
+        return "\n".join(lines)
+
+    def _parse_edited_text(self, document: str) -> list[Message] | None:
+        """
+        編集テキストを解析する。区切り行が1つも無ければ None を返す
+        （全消しと区別できないため、履歴を破棄しないで呼び出し側に委ねる）。
+        """
+        blocks: list[tuple[int, str, list[str]]] = []
+        for line in document.split("\n"):
+            matched = self._EDIT_DELIMITER_RE.match(line)
+            if matched:
+                blocks.append((int(matched.group("index")),
+                               matched.group("role"), []))
+            elif blocks:
+                blocks[-1][2].append(line)      # 本文はそのまま積む
+
+        if not blocks:
+            return None
+
+        parsed: list[Message] = []
+        for position, (index, role, body) in enumerate(blocks):
+            # 直列化のときに足した区切りの空行を1つだけ戻す（最後尾には無い）
+            if position < len(blocks) - 1 and body and body[-1] == "":
+                body.pop()
+            message = Message(role, [{"type": "text", "text": "\n".join(body)}])
+            self._restore_metadata(message, index, role)
+            parsed.append(message)
+        return parsed
+
+    def _restore_metadata(self, message: Message, index: int, role: str):
+        """
+        区切り行の番号を手がかりに、元のメッセージからメタ情報を戻す。
+
+        本文を書き換えた場合、その推論内容やトークン使用量はもはやその本文の
+        ものではない。model だけ残して破棄し、edited を立てる。
+        """
+        if not 1 <= index <= len(self.conversation_history):
+            return
+        old = self.conversation_history[index - 1]
+        if old.role != role:
+            return
+        message.model     = old.model
+        message.timestamp = old.timestamp
+        if message.text == old.text:
+            message.reasoning = old.reasoning
+            message.usage     = old.usage
+            message.status    = old.status
+            message.edited    = old.edited
+        else:
+            message.edited = True
+
     def _sync_history_from_editor(self):
         """編集テキストを conversation_history に反映する。"""
-        lines = self.conversation_text.toPlainText().split("\n")
-        new_history: list[Message] = []
-        current_role:  str | None = None
-        current_lines: list[str]  = []
+        document = self.conversation_text.toPlainText()
+        parsed   = self._parse_edited_text(document)
 
-        def _flush():
-            if current_role and current_lines:
-                text = "\n".join(current_lines).strip()
-                new_history.append(
-                    Message(current_role, [{"type": "text", "text": text}])
-                )
+        if parsed is None and self.conversation_history:
+            # 区切り行が消えている（全消しを含む）。取り込むと会話を丸ごと失う。
+            # 会話を消したい場合は「クリア」を使ってもらう（確認が入る）
+            self._make_dialog(
+                "編集を取り込めません",
+                "区切り行（──── メッセージ N [role] ────）が見つかりません。\n"
+                "区切り行は消さずに編集してください。\n\n"
+                "編集内容は破棄し、元の会話に戻します。\n"
+                "会話をすべて消す場合は「クリア」を使ってください。",
+            ).exec_()
+            self._redraw_conversation()
+            return
 
-        for line in lines:
-            matched = False
-            for prefix, role in self._LABEL_TO_ROLE.items():
-                if line.startswith(prefix):
-                    _flush()
-                    current_role  = role
-                    current_lines = [line[len(prefix):].lstrip()]
-                    matched = True
-                    break
-            if not matched and current_role is not None:
-                current_lines.append(line)  # strip() しない（空白行を保持）
-
-        _flush()
-        self._carry_over_metadata(new_history)
-        self.conversation_history = new_history
+        self.conversation_history = parsed or []
         self._redraw_conversation()
         self._update_usage_label()
         self._mark_dirty()
-
-    def _carry_over_metadata(self, new_history: list[Message]):
-        """
-        編集はテキストしか往復しないため、モデル名・推論・使用量が失われる。
-        先頭から role が一致している間は、対応する旧メッセージの情報を引き継ぐ。
-        メッセージを増減させた場合、そこから先は引き継げない。
-        """
-        for new, old in zip(new_history, self.conversation_history):
-            if new.role != old.role:
-                break
-            new.model     = old.model
-            new.reasoning = old.reasoning
-            new.usage     = old.usage
-            new.timestamp = old.timestamp
 
     # ══════════════════════════════════════════════════════════
     # 保存・読み込み
     # ══════════════════════════════════════════════════════════
 
+    def _confirm_discard(self, action: str) -> bool:
+        """未保存の会話を捨てる操作の前に確認する。"""
+        if not (self.conversation_history and self._dirty):
+            return True
+        box = self._make_dialog(
+            "確認",
+            f"未保存の変更があります。保存せずに{action}しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        box.button(QMessageBox.Yes).setText(f"{action}する")
+        box.button(QMessageBox.No).setText("やめる")
+        box.setDefaultButton(QMessageBox.No)
+        return box.exec_() == QMessageBox.Yes
+
     def _clear_conversation(self):
+        # 応答中に文書を消すと、ストリームの書き戻し位置が壊れる
+        if self._is_busy():
+            self.statusBar().showMessage("応答中はクリアできません")
+            return
+        if not self._confirm_discard("クリア"):
+            return
         if self.is_editing:
             self._toggle_edit_mode()
         self.conversation_history.clear()
@@ -2072,18 +2510,33 @@ class OpenRouterChatApp(QMainWindow):
         self.setWindowTitle(f"OpenRouter Chat - PyQt5 ｜ {mark}{name}")
 
     def _write_conversation(self, path: str) -> bool:
-        """指定パスへ書き出す。成功したら True。"""
+        """
+        指定パスへ書き出す。成功したら True。
+
+        直接上書きすると、書き込み途中で失敗したときに元の会話も失う。
+        一時ファイルへ書いてから置き換える。
+        """
+        payload = {
+            "version":        CONVERSATION_FORMAT_VERSION,
+            "session_start":  self.session_start.isoformat(),
+            "saved_at":       datetime.now().isoformat(),
+            "model":          self.model_combo.currentText(),
+            "thinking_level": self.thinking_level_combo.currentText(),
+            "system_prompt":  self.system_prompt_input.toPlainText(),
+            "conversation":   [m.to_json() for m in self.conversation_history],
+        }
+        temp_path = f"{path}.tmp"
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "version":       CONVERSATION_FORMAT_VERSION,
-                    "session_start": self.session_start.isoformat(),
-                    "saved_at":      datetime.now().isoformat(),
-                    "model":         self.model_combo.currentText(),
-                    "thinking_level": self.thinking_level_combo.currentText(),
-                    "conversation":  [m.to_json() for m in self.conversation_history],
-                }, f, ensure_ascii=False, indent=2)
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, path)
         except Exception as exc:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
             self._make_dialog("保存エラー", f"保存中にエラーが発生しました:\n{exc}").exec_()
             return False
 
@@ -2120,9 +2573,33 @@ class OpenRouterChatApp(QMainWindow):
             return False
         return self._write_conversation(path)
 
+    # 別のビューアで開いたときに外部取得が起こりうる記法
+    _REMOTE_IMAGE_RE = re.compile(
+        r"!\[[^\]]*\]\(\s*https?://|<img[^>]+src\s*=\s*[\"']?\s*https?://",
+        re.IGNORECASE,
+    )
+
     def _export_markdown(self):
         if self.is_editing:
             self._toggle_edit_mode()
+
+        # 本文はモデル出力のまま書き出す。アプリ内では描画時に遮断しているが、
+        # 別の Markdown ビューアは外部画像を取得しうる
+        if any(self._REMOTE_IMAGE_RE.search(m.text) for m in self.conversation_history):
+            box = self._make_dialog(
+                "確認",
+                "会話に外部URLの画像記法が含まれています。\n"
+                "書き出した .md を別のビューアで開くと、その画像を\n"
+                "取得しに行く可能性があります。\n\n"
+                "このまま書き出しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            box.button(QMessageBox.Yes).setText("書き出す")
+            box.button(QMessageBox.No).setText("やめる")
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec_() != QMessageBox.Yes:
+                return
+
         ts   = self.session_start.strftime("%Y%m%d_%H%M%S")
         path, _ = QFileDialog.getSaveFileName(
             self, "Markdown としてエクスポート", f"conversation_{ts}.md",
@@ -2153,6 +2630,11 @@ class OpenRouterChatApp(QMainWindow):
             ).exec_()
 
     def _load_conversation(self):
+        if self._is_busy():
+            self.statusBar().showMessage("応答中は読み込みできません")
+            return
+        if not self._confirm_discard("読み込み"):
+            return
         if self.is_editing:
             self._toggle_edit_mode()
         path, _ = QFileDialog.getOpenFileName(
@@ -2182,8 +2664,19 @@ class OpenRouterChatApp(QMainWindow):
             self.conversation_history = history
 
             saved_level = data.get("thinking_level", "")
-            if saved_level in THINKING_LEVELS:
+            if saved_level and self.thinking_level_combo.findText(saved_level) >= 0:
                 self.thinking_level_combo.setCurrentText(saved_level)
+
+            # 保存時のシステムプロンプトを復元する。
+            # 復元しないと、別の会話を読み込んでも現在の設定のまま送ってしまう
+            if "system_prompt" in data:
+                self.system_prompt_input.setPlainText(data.get("system_prompt") or "")
+
+            # 保存済みの開始時刻を引き継ぐ（MD出力や既定ファイル名の日付がずれる）
+            try:
+                self.session_start = datetime.fromisoformat(data["session_start"])
+            except (KeyError, TypeError, ValueError):
+                pass
 
             self._redraw_conversation()
             self._show_last_reasoning()
@@ -2233,15 +2726,23 @@ class OpenRouterChatApp(QMainWindow):
 
         # 終了が確定してから通信スレッドを止める。
         # 受信待ちでブロックしていると止まりきらないことがあるため、
-        # 待ち時間は短く区切る（残ったスレッドはデーモン相当で放置してよい）。
-        for worker in [self.worker, *self._retired_workers]:
-            if worker is not None and worker.isRunning():
+        # 全体で 2 秒までに区切る（ワーカー毎に待つと件数分だけ待たされる）。
+        workers = [w for w in [self.worker, *self._retired_workers,
+                               self._catalog_worker] if w is not None]
+        for worker in workers:
+            if worker.isRunning() and isinstance(worker, ApiWorker):
                 worker.cancel()
-        for worker in [self.worker, *self._retired_workers]:
-            if worker is not None:
-                worker.wait(1_000)
-        if self._catalog_worker is not None:
-            self._catalog_worker.wait(1_000)
+
+        deadline = time.monotonic() + 2.0
+        for worker in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            worker.wait(int(remaining * 1000))
+
+        # 止まりきらなかったスレッドが残ると、通常終了では QThread の破棄で
+        # 異常終了扱いになる。main() 側で終了方法を切り替えるために記録する
+        self.threads_pending = any(w.isRunning() for w in workers)
         event.accept()
 
 
@@ -2265,6 +2766,11 @@ def install_excepthook():
         sys.stderr.write(detail)
         if in_hook:          # ダイアログ表示中の再入で無限ループにしない
             return
+        # ウィジェットは GUI スレッド以外から作ってはいけない。
+        # ワーカースレッドの例外でここに来た場合は記録だけにとどめる
+        app = QApplication.instance()
+        if app is None or QThread.currentThread() is not app.thread():
+            return
         in_hook = True
         try:
             box = QMessageBox()
@@ -2281,6 +2787,21 @@ def install_excepthook():
             in_hook = False
 
     sys.excepthook = _hook
+
+
+def finish_application(window: "OpenRouterChatApp", exit_code: int):
+    """
+    終了処理。止まりきらないスレッドが残った場合だけ強制終了へ切り替える。
+
+    通常終了だと実行中の QThread が破棄されて Qt が異常終了扱いにするため。
+    設定・会話の保存は closeEvent で済んでいる。
+    """
+    if not window.threads_pending:
+        sys.exit(exit_code)         # 通常はこちら。atexit も走る
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(FORCED_EXIT_CODE)
 
 
 def main():
@@ -2308,14 +2829,7 @@ def main():
 
     window = OpenRouterChatApp()
     window.show()
-    exit_code = app.exec_()
-
-    # 受信待ちでブロックしたままのスレッドが残っていると、通常終了では
-    # 実行中の QThread が破棄されて Qt が異常終了扱いにする。
-    # 設定・会話の保存は closeEvent で済んでいるので、ここで打ち切る。
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(exit_code)
+    finish_application(window, app.exec_())
 
 
 if __name__ == "__main__":
