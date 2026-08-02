@@ -251,19 +251,50 @@ class TestCloseEvent:
 
 
 class TestEditMode:
-    def test_metadata_is_carried_over(self, window):
+    def _edit(self, window, before, after):
+        window._toggle_edit_mode()
+        text = window.conversation_text.toPlainText().replace(before, after)
+        window.conversation_text.setPlainText(text)
+        window._toggle_edit_mode()
+        return window.conversation_history
+
+    def test_unchanged_text_keeps_all_metadata(self, window):
         GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
         window.conversation_history = [
             Message.user("元の質問"),
-            Message.assistant("元の回答", model="x-ai/grok-4.3", reasoning="R"),
+            Message.assistant("元の回答", model="x-ai/grok-4.3", reasoning="R",
+                              usage={"completion_tokens": 9}),
         ]
-        window._toggle_edit_mode()
-        edited = window.conversation_text.toPlainText().replace("元の回答", "直した回答")
-        window.conversation_text.setPlainText(edited)
-        window._toggle_edit_mode()
-
-        last = window.conversation_history[1]
-        assert last.text == "直した回答"
-        assert last.model == "x-ai/grok-4.3"
+        last = self._edit(window, "存在しない文字列", "x")[1]
         assert last.reasoning == "R"
+        assert last.usage == {"completion_tokens": 9}
+        assert last.edited is False
+
+    def test_rewritten_text_drops_stale_metadata(self, window):
+        """
+        本文を書き換えたのに元の推論・使用量を残すと、その本文のものでない
+        情報を提示してしまう。model だけ残して破棄する。
+        """
+        GUI.MODEL_CATALOG.update(CATALOG_FIXTURE)
+        window.conversation_history = [
+            Message.user("元の質問"),
+            Message.assistant("元の回答", model="x-ai/grok-4.3", reasoning="R",
+                              usage={"completion_tokens": 9}),
+        ]
+        last = self._edit(window, "元の回答", "直した回答")[1]
+
+        assert last.text == "直した回答"
+        assert last.model == "x-ai/grok-4.3"     # どのモデル由来かは残す
+        assert last.reasoning == ""              # 本文と対応しないので捨てる
+        assert last.usage == {}
+        assert last.edited is True
         assert "Grok: 直した回答" in window.conversation_text.toPlainText()
+
+    def test_cannot_enter_edit_mode_while_streaming(self, window, monkeypatch):
+        monkeypatch.setattr(GUI.ApiWorker, "start", lambda self: None)
+        window.api_key = "key"
+        window._start_request([{"role": "user", "content": []}])
+
+        window._toggle_edit_mode()
+        assert window.is_editing is False
+        assert "応答中" in window.statusBar().currentMessage()

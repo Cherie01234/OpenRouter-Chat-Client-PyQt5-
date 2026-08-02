@@ -42,24 +42,24 @@ class TestStreamingDisplay:
 
     def test_markdown_is_applied_when_finished(self, window):
         stream(window, DEEPSEEK, ["**太字** です"])
-        window._on_stream_finished("", {}, False)
+        window._on_stream_finished("", {}, GUI.STATUS_COMPLETED)
         shown = window.conversation_text.toPlainText()
         assert "太字 です" in shown and "**" not in shown
         assert "▌" not in shown
 
     def test_raw_markdown_is_kept_in_history(self, window):
         stream(window, DEEPSEEK, ["**太字**"])
-        window._on_stream_finished("", {}, False)
+        window._on_stream_finished("", {}, GUI.STATUS_COMPLETED)
         assert window.conversation_history[-1].content[0]["text"] == "**太字**"
 
     def test_response_records_its_model(self, window):
         stream(window, GROK, ["返答"])
-        window._on_stream_finished("", {}, False)
+        window._on_stream_finished("", {}, GUI.STATUS_COMPLETED)
         assert window.conversation_history[-1].model == GROK
 
     def test_reasoning_and_usage_are_stored(self, window):
         stream(window, DEEPSEEK, ["返答"])
-        window._on_stream_finished("推論の中身", {"completion_tokens": 12}, False)
+        window._on_stream_finished("推論の中身", {"completion_tokens": 12}, GUI.STATUS_COMPLETED)
         last = window.conversation_history[-1]
         assert last.reasoning == "推論の中身"
         assert last.usage["completion_tokens"] == 12
@@ -77,7 +77,7 @@ class TestStreamingDisplay:
 class TestCancel:
     def test_partial_text_and_history_agree(self, window):
         stream(window, DEEPSEEK, ["こんに", "ちは。"])
-        window._on_stream_finished("", {}, True)
+        window._on_stream_finished("", {}, GUI.STATUS_CANCELLED)
 
         shown = window.conversation_text.toPlainText()
         assert "（キャンセルされました）" in shown
@@ -88,21 +88,21 @@ class TestCancel:
 
     def test_buttons_are_restored(self, window):
         stream(window, DEEPSEEK, ["部分"])
-        window._on_stream_finished("", {}, True)
+        window._on_stream_finished("", {}, GUI.STATUS_CANCELLED)
         assert window.send_button.isEnabled()
         assert not window.cancel_button.isEnabled()
 
     def test_zero_chunk_cancel_removes_the_whole_message(self, window):
         window._start_streaming_display(GROK)
         assert "Grok:" in window.conversation_text.toPlainText()
-        window._on_stream_finished("", {}, True)
+        window._on_stream_finished("", {}, GUI.STATUS_CANCELLED)
         assert "Grok:" not in window.conversation_text.toPlainText()
         assert window.conversation_history == []
 
     def test_cancel_keeps_previous_reasoning(self, window):
         window.reasoning_text.setPlainText("前回の推論")
         stream(window, DEEPSEEK, ["部分"])
-        window._on_stream_finished("", {}, True)
+        window._on_stream_finished("", {}, GUI.STATUS_CANCELLED)
         assert window.reasoning_text.toPlainText() == "前回の推論"
 
     def test_cancel_without_request_is_a_noop(self, window):
@@ -145,7 +145,7 @@ class TestBusyGuard:
         assert not window.worker.isRunning()      # スレッドは動いていない
         assert window._is_busy()                  # それでも応答は未確定
 
-        window._on_stream_finished("", {}, False)
+        window._on_stream_finished("", {}, GUI.STATUS_COMPLETED)
         assert not window._is_busy()
 
     def test_error_clears_the_busy_state(self, window, monkeypatch, auto_dialog):
