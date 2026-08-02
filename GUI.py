@@ -863,6 +863,10 @@ class OpenRouterChatApp(QMainWindow):
         self.worker: ApiWorker | None = None
         # 中断要求後もしばらく生き残るワーカーの置き場（GC 防止）
         self._retired_workers: list[ApiWorker] = []
+        # リクエスト開始から応答確定まで True。
+        # スレッドの生存だけで判定すると、run() が終わってから
+        # 完了シグナルが届くまでの間だけ「空き」に見えてしまう
+        self._request_active = False
 
         # ストリーミング状態
         self._stream_buffer        = ""
@@ -1534,8 +1538,9 @@ class OpenRouterChatApp(QMainWindow):
         return messages
 
     def _is_busy(self) -> bool:
-        """API 応答の受信中かどうか。"""
-        return self.worker is not None and self.worker.isRunning()
+        """API 応答の受信中、または受信済みで確定待ちかどうか。"""
+        return self._request_active or \
+            (self.worker is not None and self.worker.isRunning())
 
     def _send_message(self):
         # 送信ボタンを無効化しても Ctrl+Enter は素通りするため、ここで止める。
@@ -1595,6 +1600,7 @@ class OpenRouterChatApp(QMainWindow):
         self.worker.chunk_received.connect(self._on_chunk_received)
         self.worker.response_finished.connect(self._on_stream_finished)
         self.worker.error.connect(self._handle_api_error)
+        self._request_active = True
         self.worker.start()
 
         self._start_streaming_display(model_id)
@@ -1707,6 +1713,7 @@ class OpenRouterChatApp(QMainWindow):
 
     def _on_stream_finished(self, reasoning: str, usage: dict,
                             cancelled: bool = False):
+        self._request_active = False
         self._reset_stream_state()
 
         bar       = self.conversation_text.verticalScrollBar()
@@ -1773,6 +1780,7 @@ class OpenRouterChatApp(QMainWindow):
 
     def _handle_api_error(self, error_message: str):
         # エラー発生時は部分ストリームを削除してエラーメッセージに差し替え
+        self._request_active = False
         self._reset_stream_state()
         cursor = QTextCursor(self.conversation_text.document())
         cursor.setPosition(self._stream_message_start)

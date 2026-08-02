@@ -107,6 +107,20 @@ def send(window, text="テスト"):
     window.message_input.send_requested.emit()
 
 
+def wait_for_reply(qapp, window, timeout=10):
+    """
+    応答が確定するまで待つ。
+
+    シグナルはキュー経由で届くので、スレッドの生存ではなく
+    「結果が画面と履歴に入ったか」を待つ。
+    """
+    return wait_until(
+        qapp,
+        lambda: any(m.role == "assistant" for m in window.conversation_history),
+        timeout=timeout,
+    )
+
+
 class TestNormalResponse:
     def test_full_round_trip(self, qapp, window):
         _StreamState.chunks = ["# 見出し\n", "本文 **強調**\n"]
@@ -116,7 +130,7 @@ class TestNormalResponse:
         window.model_combo.setCurrentText(MODEL)
         send(window)
 
-        assert wait_until(qapp, lambda: not window._is_busy(), timeout=10)
+        assert wait_for_reply(qapp, window)
 
         shown = window.conversation_text.toPlainText()
         assert "見出し" in shown
@@ -139,7 +153,7 @@ class TestNormalResponse:
         window.model_combo.setCurrentText(MODEL)
         send(window)
 
-        assert wait_until(qapp, lambda: not window._is_busy(), timeout=10)
+        assert wait_for_reply(qapp, window)
         assert "evil.example" not in window.conversation_text.toHtml()
 
 
@@ -191,10 +205,14 @@ class TestErrorResponse:
         window.model_combo.setCurrentText(MODEL)
         send(window)
 
-        assert wait_until(qapp, lambda: not window._is_busy(), timeout=10)
+        assert wait_until(
+            qapp,
+            lambda: "エラー" in window.conversation_text.toPlainText(),
+            timeout=10,
+        )
 
         shown = window.conversation_text.toPlainText()
-        assert "エラー" in shown and "503" in shown
+        assert "503" in shown
         # 応答は履歴に入れない（再送しても本文が二重にならない）
         assert all(m.role != "assistant" for m in window.conversation_history)
         assert window.send_button.isEnabled()

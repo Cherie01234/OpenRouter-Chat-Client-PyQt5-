@@ -130,6 +130,33 @@ class TestBusyGuard:
         assert window.message_input.toPlainText() == "二重送信"
         assert "応答中" in window.statusBar().currentMessage()
 
+    def test_still_busy_after_the_thread_ends_but_before_the_reply_lands(
+            self, window, monkeypatch):
+        """
+        完了シグナルはキュー経由で届くため、run() が終わってから
+        画面に反映されるまでの間はスレッドが動いていない。
+        ここを「空き」と判定すると、確定前の応答が Ctrl+Enter で破棄されうる。
+        """
+        monkeypatch.setattr(GUI.ApiWorker, "start", lambda self: None)
+        window.api_key = "key"
+        window._start_request(
+            [{"role": "user", "content": [{"type": "text", "text": "Q"}]}])
+
+        assert not window.worker.isRunning()      # スレッドは動いていない
+        assert window._is_busy()                  # それでも応答は未確定
+
+        window._on_stream_finished("", {}, False)
+        assert not window._is_busy()
+
+    def test_error_clears_the_busy_state(self, window, monkeypatch, auto_dialog):
+        auto_dialog(0)
+        monkeypatch.setattr(GUI.ApiWorker, "start", lambda self: None)
+        window.api_key = "key"
+        window._start_request(
+            [{"role": "user", "content": [{"type": "text", "text": "Q"}]}])
+        window._handle_api_error("APIエラー: 500")
+        assert not window._is_busy()
+
 
 class TestErrorPath:
     def test_partial_stream_is_removed_so_retry_is_safe(self, window, auto_dialog):
