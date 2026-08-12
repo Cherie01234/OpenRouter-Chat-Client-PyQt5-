@@ -124,9 +124,40 @@ python GUI.py
 推論機能の対応可否・コンテキスト長・出力上限・価格・画像入力の可否は、
 起動時に OpenRouter の `/api/v1/models` から取得します（認証不要）。
 
-モデルを追加・変更するには、コード冒頭の `MODEL_CONFIGS` に表示名と色を登録します。
-それ以外の情報は自動で補完されます。登録したモデルIDが OpenRouter に存在しない場合は、
+### モデルの追加・変更
+
+`GUI.py` と同じ場所に `models.local.json` を置くと、コードを書き換えずに
+モデル一覧を差し替えられます（このファイルは `.gitignore` 済みです）。
+
+```json
+{
+  "deepseek/deepseek-v4-pro": {
+    "display_name": "DeepSeek Pro",
+    "color": "#7ec8a0"
+  },
+  "qwen/qwen3.7-flash": {
+    "display_name": "Qwen Flash",
+    "color": "#c084fc",
+    "supports_thinking_level": false
+  }
+}
+```
+
+- キーは OpenRouter のモデルID（`提供元/モデル名`）
+- `display_name` と `color` は省略可（省略時はIDの後半と既定色）
+- `supports_thinking_level` は、思考レベル（effort）の指定に対応しないモデルで `false`
+- ファイルを置かない場合は `GUI.py` の `DEFAULT_MODEL_CONFIGS` が使われます
+- 記述に問題があれば、既定の一覧で起動したうえでステータスバーに理由が出ます
+
+推論の対応可否・コンテキスト長・出力上限・価格・入力形式は自動で補完されるため、
+記述する必要はありません。登録したモデルIDが OpenRouter に存在しない場合は、
 起動時にステータスバーへ警告が表示されます。
+
+> **モデルが選べるのに 404 になる場合**
+> `No endpoints available matching your guardrail restrictions and data policy`
+> が返るときは、そのモデルを提供するプロバイダが、アカウントのプライバシー設定で
+> 除外されています。提供元が1社しかないモデルで起こりやすい現象です。
+> [OpenRouter の Privacy 設定](https://openrouter.ai/settings/privacy)を確認してください。
 
 ---
 
