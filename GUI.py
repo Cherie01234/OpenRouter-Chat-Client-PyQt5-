@@ -37,13 +37,17 @@ except ImportError:
     HAS_MARKDOWN = False
 
 # ═══════════════════════════════════════════════════════════════
-# モデル設定（ここだけ編集すれば新モデル追加可能）
+# モデル設定
 # ═══════════════════════════════════════════════════════════════
+
+USER_COLOR   = "#82b8e8"
+SYSTEM_COLOR = "#e88080"
+UNKNOWN_ASSISTANT_COLOR = "#e8e8e8"
 
 # 表示名と色だけを手で定義する。推論の対応可否・コンテキスト長・出力上限・
 # 価格・入力形式は、起動時に /api/v1/models から取得して上書きする。
 # ここの supports_* は、カタログを取得できなかったときの控え。
-MODEL_CONFIGS: dict[str, dict] = {
+DEFAULT_MODEL_CONFIGS: dict[str, dict] = {
     "deepseek/deepseek-v4-pro": {
         "display_name": "DeepSeek",
         "color": "#7ec8a0",          # 会話表示の送信者色
@@ -63,6 +67,65 @@ MODEL_CONFIGS: dict[str, dict] = {
         "supports_thinking_level": True,
     },
 }
+
+# 使うモデルは人によって変わるうえ、入れ替えも頻繁になる。
+# このファイルを GUI.py の隣に置くと、上の定義の代わりに使う。
+# .gitignore 済みなので、リポジトリと分岐させずに手元だけ変えられる。
+MODEL_CONFIGS_FILE = "models.local.json"
+
+
+def model_configs_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        MODEL_CONFIGS_FILE)
+
+
+def load_model_configs(path: str | None = None) -> tuple[dict[str, dict], str]:
+    """
+    (モデル定義, 問題があればその説明) を返す。
+
+    ファイルが壊れていても起動は止めない。組み込みの定義で動かしたうえで、
+    黙って既定に戻ったと誤解されないよう、説明を呼び出し側へ返す。
+    """
+    path = path or model_configs_path()
+    if not os.path.exists(path):
+        return dict(DEFAULT_MODEL_CONFIGS), ""
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return dict(DEFAULT_MODEL_CONFIGS), f"{MODEL_CONFIGS_FILE}: {exc}"
+
+    if not isinstance(data, dict):
+        return dict(DEFAULT_MODEL_CONFIGS), \
+            f"{MODEL_CONFIGS_FILE}: モデルIDをキーにしたオブジェクトにしてください"
+
+    configs: dict[str, dict] = {}
+    skipped: list[str] = []
+    for model_id, entry in data.items():
+        # OpenRouter のモデルIDは必ず "提供元/モデル名" の形
+        if not isinstance(model_id, str) or "/" not in model_id:
+            skipped.append(str(model_id))
+            continue
+        entry = entry if isinstance(entry, dict) else {}
+        configs[model_id] = {
+            "display_name": str(entry.get("display_name")
+                                or model_id.split("/")[-1]),
+            "color": str(entry.get("color") or UNKNOWN_ASSISTANT_COLOR),
+            "supports_reasoning": bool(entry.get("supports_reasoning", True)),
+            "supports_thinking_level": bool(
+                entry.get("supports_thinking_level", True)),
+        }
+
+    if not configs:
+        return dict(DEFAULT_MODEL_CONFIGS), \
+            f"{MODEL_CONFIGS_FILE}: 有効なモデルがありません"
+    if skipped:
+        return configs, f"{MODEL_CONFIGS_FILE}: 無視した項目 {', '.join(skipped)}"
+    return configs, ""
+
+
+MODEL_CONFIGS, MODEL_CONFIGS_WARNING = load_model_configs()
 
 # OpenRouter の reasoning.effort が受け付ける値（弱い順）。
 # 旧実装は Gemini に存在しない "level" フィールドを送っていた。
@@ -347,10 +410,6 @@ def extract_text(content) -> str:
 # ═══════════════════════════════════════════════════════════════
 # 会話データモデル
 # ═══════════════════════════════════════════════════════════════
-
-USER_COLOR   = "#82b8e8"
-SYSTEM_COLOR = "#e88080"
-UNKNOWN_ASSISTANT_COLOR = "#e8e8e8"
 
 # 保存フォーマットの版。1 = model/reasoning を持たない旧形式
 CONVERSATION_FORMAT_VERSION = 2
@@ -1068,6 +1127,14 @@ class OpenRouterChatApp(QMainWindow):
         self._refresh_preset_combo()
         self._on_model_changed(self.model_combo.currentText())
         self._update_usage_label()
+
+        # モデル定義ファイルに問題があれば知らせる。
+        # 黙って既定のリストに戻ると、変更したつもりで気づけない
+        if MODEL_CONFIGS_WARNING:
+            self.statusBar().showMessage(
+                f"モデル定義を読み込めませんでした（既定を使用）: "
+                f"{MODEL_CONFIGS_WARNING}"
+            )
 
         # APIキー未設定
         if not self.api_key:

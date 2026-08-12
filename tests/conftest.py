@@ -60,8 +60,20 @@ def clean_catalog():
     GUI.MODEL_CATALOG.clear()
 
 
+@pytest.fixture(autouse=True)
+def fixed_model_configs(monkeypatch):
+    """
+    テスト中のモデル一覧を固定する。
+
+    実際の一覧は models.local.json で差し替えられるうえ、入れ替えも頻繁に
+    起きる。組み込みの定義に依存させると、モデルを変えるたびにテストが壊れる。
+    """
+    monkeypatch.setattr(GUI, "MODEL_CONFIGS", dict(TEST_MODEL_CONFIGS))
+    yield TEST_MODEL_CONFIGS
+
+
 @pytest.fixture
-def make_window(qapp, monkeypatch):
+def make_window(qapp, monkeypatch, fixed_model_configs):
     """
     メインウィンドウを生成するファクトリ。
 
@@ -122,6 +134,23 @@ def wait_until(app, predicate, timeout: float = 5.0) -> bool:
     app.processEvents()
     return bool(predicate())
 
+
+# テスト中に使うモデル一覧。GUI.py の組み込み定義とは切り離してある
+# （実際の一覧は models.local.json で差し替えられ、入れ替えも頻繁に起きる）。
+TEST_MODEL_CONFIGS = {
+    "deepseek/deepseek-v4-pro": {
+        "display_name": "DeepSeek", "color": "#7ec8a0",
+        "supports_reasoning": True, "supports_thinking_level": True,
+    },
+    "deepseek/deepseek-v4-flash-0731": {
+        "display_name": "DeepSeek Flash", "color": "#5aa87f",
+        "supports_reasoning": True, "supports_thinking_level": True,
+    },
+    "openai/gpt-5.6-luna": {
+        "display_name": "Luna", "color": "#c084fc",
+        "supports_reasoning": True, "supports_thinking_level": True,
+    },
+}
 
 # 実際の /api/v1/models の値に合わせてある（2026-08-02 時点）
 CATALOG_FIXTURE = {
